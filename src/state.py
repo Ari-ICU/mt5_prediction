@@ -1,136 +1,121 @@
-from datetime import datetime
-from src.strategies.simple_strategy import SimpleStrategy
+from .models.data_models import MarketData, AccountData, TradeSettings, ServerConfig
+from .core.events import events, EventType
+from .core.logger import logger
+import time
 
 class AppState:
+    """Manages the current synchronized state of the application.
+    Listens to events and maintains a local cache of the data models.
+    """
     def __init__(self):
-        # Strategy Engine
-        self.strategy = SimpleStrategy()
+        self.market = MarketData()
+        self.account = AccountData()
+        self.settings = TradeSettings()
+        self.server_config = ServerConfig()
         
-        # Connection State
         self.is_connected = False
-        self.last_poll_time = 0
-        
-        # Market Data
-        self.current_symbol = ""
-        self.current_bid = 0.0
-        self.current_ask = 0.0
-        self.last_price = 0.0
-        self.market_is_open = False
-        self.last_market_status = None
-
-        # Account Data
-        self.account_name = "---"
-        self.account_balance = 0.0
-        self.account_equity = 0.0
-        self.account_margin = 0.0
-        self.account_free_margin = 0.0
-        self.account_profit = 0.0
-        
-        # Trading Settings (Synced with GUI)
-        self.trade_settings = {
-            "lot": 0.01,
-            "sl": 0.0,
-            "tp": 0.0
-        }
-        
-        # Command Queue
+        self.last_heartbeat = 0
         self.pending_command = ""
         
-        # Auto Trading
-        self.auto_trade_enabled = False
+        # Strategy (kept for immediate trigger)
+        from src.strategies.simple_strategy import SimpleStrategy
+        self.strategy = SimpleStrategy()
         
-        # UI Callbacks
-        self.log_callback = None
-        self.connection_callback = None
-        self.market_status_callback = None
-        self.price_update_callback = None
-        self.account_update_callback = None
-        
-        # AI Predictor (Attached from main.py)
+        # AI Predictor
         self.predictor = None
 
-    def log(self, msg, log_type="info"):
-        if self.log_callback:
-            self.log_callback(msg, log_type)
-        else:
-            print(f"[{log_type.upper()}] {msg}")
+        # Subscribe to internal events to maintain state
+        events.subscribe(EventType.PRICE_UPDATE, self._on_price_update)
+        events.subscribe(EventType.ACCOUNT_UPDATE, self._on_account_update)
+        events.subscribe(EventType.CONNECTION_CHANGE, self._on_connection_change)
+        events.subscribe(EventType.SETTINGS_CHANGE, self._on_settings_update)
+        events.subscribe(EventType.TRADE_COMMAND, self._on_trade_command)
 
-    def update_connection(self, status):
-        self.is_connected = status
-        if self.connection_callback:
-            self.connection_callback(status)
-
-    def update_market(self, is_open):
-        self.market_is_open = is_open
-        if self.market_status_callback:
-            self.market_status_callback(is_open)
-
-    def update_price(self, symbol, bid, ask):
-        self.current_symbol = symbol
-        self.current_bid = bid
-        self.current_ask = ask
+    def _on_price_update(self, data: MarketData):
+        self.market = data
+        self.last_heartbeat = time.time()
+        if not self.is_connected:
+            events.emit(EventType.CONNECTION_CHANGE, True)
         
-        if self.price_update_callback:
-            self.price_update_callback(symbol, bid, ask)
-            
-        # TRIGGER: Evaluate strategy immediately on new price data
-        if self.market_is_open:
+        # Trigger strategy if auto-trade is on
+        if self.settings.auto_trade:
             self.evaluate_strategy()
 
-    def update_account(self, name, balance, equity, margin, free_margin, profit):
-        self.account_name = name
-        self.account_balance = balance
-        self.account_equity = equity
-        self.account_margin = margin
-        self.account_free_margin = free_margin
-        self.account_profit = profit
-        if self.account_update_callback:
-            self.account_update_callback(name, balance, equity, margin, free_margin, profit)
+    def _on_account_update(self, data: AccountData):
+        self.account = data
 
-    def update_trade_settings(self, lot, sl, tp):
-        """Called by GUI to sync trading parameters."""
-        try:
-            self.trade_settings["lot"] = float(lot)
-            self.trade_settings["sl"] = float(sl)
-            self.trade_settings["tp"] = float(tp)
-        except ValueError:
-            pass # Ignore invalid inputs while typing
+    def _on_connection_change(self, status: bool):
+        if status and not self.is_connected:
+            logger.success("🔌 MT5 EA Connection Established!")
+        elif not status and self.is_connected:
+            logger.warning("📡 MT5 EA Disconnected")
+            
+        self.is_connected = status
+        if status:
+            self.last_heartbeat = time.time()
 
-    def queue_command(self, action, symbol=None, lot=None, sl=None, tp=None):
-        """Centralized method to queue commands for MT5."""
-        if not symbol: symbol = self.current_symbol
-        if lot is None: lot = self.trade_settings["lot"]
-        if sl is None: sl = self.trade_settings["sl"]
-        if tp is None: tp = self.trade_settings["tp"]
+    def _on_settings_update(self, settings: TradeSettings):
+        if self.settings.auto_trade != settings.auto_trade:
+            status = "ENABLED" if settings.auto_trade else "DISABLED"
+            if settings.auto_trade:
+                logger.success(f"🤖 AI Trading Engine {status}")
+            else:
+                logger.warning(f"🤖 AI Trading Engine {status}")
+        
+        if self.settings.lot != settings.lot:
+            logger.info(f"⚙️ Global Lot updated to: {settings.lot}")
 
-        # Format: ACTION|SYMBOL|LOT|SL|TP
-        cmd = f"{action}|{symbol}|{lot}|{sl}|{tp}"
-        self.pending_command = cmd
-        self.log(f"Queued: {action} ({symbol})", "info")
+        self.settings = settings
+
+    def _on_trade_command(self, cmd_data: dict):
+        action = cmd_data.get("action")
+        symbol = cmd_data.get("symbol", self.market.symbol)
+        
+        if action == "DATA_SYNC":
+            tf = cmd_data.get("tf", "H1")
+            bars = cmd_data.get("bars", "5000")
+            self.pending_command = f"{action}|{symbol}|{tf}|{bars}|0"
+            logger.info(f"Queued Data Sync: {symbol} {tf} ({bars} bars)")
+            return
+
+        if action == "DATA_SYNC_RANGE":
+            tf = cmd_data.get("tf", "H1")
+            start = cmd_data.get("start")
+            end = cmd_data.get("end")
+            self.pending_command = f"{action}|{symbol}|{tf}|{start}|{end}"
+            logger.info(f"Queued Range Sync: {symbol} {tf} ({start} to {end})")
+            return
+
+        lot = cmd_data.get("lot", self.settings.lot)
+        sl = cmd_data.get("sl", self.settings.sl)
+        tp = cmd_data.get("tp", self.settings.tp)
+        
+        self.pending_command = f"{action}|{symbol}|{lot}|{sl}|{tp}"
+        logger.info(f"Queued Order: {action} {lot} {symbol}")
 
     def evaluate_strategy(self):
-        """Run the strategy and execute trade if Auto-Trading is enabled."""
-        if not self.auto_trade_enabled:
+        if not self.market.is_open:
             return
 
         try:
-            # Build state dict for strategy
             state_dict = {
-                "current_symbol": self.current_symbol,
-                "current_bid": self.current_bid,
-                "current_ask": self.current_ask,
-                "market_is_open": self.market_is_open,
-                "predictor": self.predictor # Pass AI predictor if needed
+                "current_symbol": self.market.symbol,
+                "current_bid": self.market.bid,
+                "current_ask": self.market.ask,
+                "market_is_open": self.market.is_open,
+                "predictor": self.predictor,
+                "buy_threshold": self.settings.buy_threshold,
+                "sell_threshold": self.settings.sell_threshold
             }
             
             decision = self.strategy.run(state_dict)
             
             if decision in ["BUY", "SELL"]:
-                self.log(f"🤖 AI Decision: {decision}", "success")
-                self.queue_command(decision)
+                logger.info(f"🤖 Strategy Signal: {decision}")
+                events.emit(EventType.TRADE_COMMAND, {"action": decision})
                 
         except Exception as e:
-            self.log(f"Strategy error: {e}", "error")
+            logger.error(f"Strategy runtime error: {e}")
 
-# Global singleton instance
+# Singleton state instance
 state = AppState()

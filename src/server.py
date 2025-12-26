@@ -1,7 +1,14 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
+from urllib.parse import parse_qs
 from . import config
-from .state import state
+from .core.events import events, EventType
+from .core.logger import logger
+from .models.data_models import MarketData, AccountData
+
+# Ensure dataset directory exists at startup
+import os
+os.makedirs("dataset", exist_ok=True)
 
 class MT5Handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -10,61 +17,116 @@ class MT5Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        state.last_poll_time = time.time()
-        if not state.is_connected:
-            state.update_connection(True)
-            state.log("🔌 MT5 EA connected!", "success")
-
         content_length = int(self.headers.get('Content-Length', 0))
-        post_data = self.rfile.read(content_length).decode('utf-8')
-        post_data = post_data.replace('\x00', '').replace('\r', '').replace('\n', '').strip()
-
+        post_data = self.rfile.read(content_length).decode('utf-8', errors='ignore')
+        
+        # Clean null bytes
+        post_data = post_data.replace('\x00', '').strip()
+        
+        # Robust parsing for MT5 data (which might contain unencoded history)
         data_dict = {}
-        for pair in post_data.split('&'):
-            if '=' in pair:
-                key, value = pair.split('=', 1)
-                data_dict[key] = value.strip()
+        if "&history=" in post_data:
+            # Special case for history sync: split manually
+            parts = post_data.split("&history=", 1)
+            # Parse the prefix normally
+            data_dict = {k: v[0] for k, v in parse_qs(parts[0]).items()}
+            # Assign the raw history (the rest of the string)
+            data_dict["history"] = parts[1]
+        else:
+            # Standard parsing
+            data_dict = {k: v[0] for k, v in parse_qs(post_data).items()}
 
-        if "market" in data_dict:
-            state.update_market(data_dict["market"] == "OPEN")
+        # Pulse check log (Only every 60 seconds for a quiet console)
+        from .state import state
+        if time.time() - state.last_heartbeat > 60:
+             logger.debug(f"🔵 Data Pulse: {data_dict.get('symbol')} @ {data_dict.get('bid')}")
+             state.last_heartbeat = time.time()
 
-        try:
-            symbol = data_dict.get("symbol", state.current_symbol)
-            bid = float(data_dict.get("bid", state.current_bid))
-            ask = float(data_dict.get("ask", state.current_ask))
-            
-            if bid > 0 and ask > 0:
-                state.update_price(symbol, bid, ask)
-            
-            # Update Account Info
-            if "balance" in data_dict:
-                name = data_dict.get("name", "Demo Account")
-                balance = float(data_dict.get("balance", 0.0))
-                equity = float(data_dict.get("equity", 0.0))
-                margin = float(data_dict.get("margin", 0.0))
-                free_margin = float(data_dict.get("free_margin", 0.0))
-                profit = float(data_dict.get("profit", 0.0))
-                state.update_account(name, balance, equity, margin, free_margin, profit)
-                
-        except (ValueError, KeyError) as e:
-            state.log(f"⚠ Price parse error: {e}", "warning")
-
-        # Send pending command if any
-        response_text = state.pending_command
+        self._process_data(data_dict)
+        
+        # Response to EA
         self.send_response(200)
-        self.send_header("Content-type", "text/plain")
+        self.send_header('Content-type', 'text/plain')
         self.end_headers()
+        
+        response_text = state.pending_command if state.pending_command else "OK"
         self.wfile.write(response_text.encode("utf-8"))
 
-        if state.pending_command != "":
-            state.log(f"✓ Command sent to MT5: {state.pending_command}", "success")
+        if state.pending_command:
+            logger.info(f"Sent to MT5: {state.pending_command}")
             state.pending_command = ""
 
+    def _process_data(self, data: dict):
+        try:
+            # 0. Handle Historical Data (for training)
+            if "history" in data:
+                symbol = data.get("symbol", "UNKNOWN")
+                filename = f"dataset/{symbol}_history.csv"
+                raw_history = data["history"]
+                
+                # Basic validation
+                lines = raw_history.strip().split("\n")
+                if not lines:
+                    logger.warning(f"⚠️ Received history batch for {symbol} but it was empty.")
+                    return
+
+                # Append history data to file
+                try:
+                    is_new = not os.path.exists(filename) or os.path.getsize(filename) == 0
+                    
+                    # Ensure the data ends with a newline to avoid merging with next batch
+                    if not raw_history.endswith("\n"):
+                        raw_history += "\n"
+
+                    with open(filename, "a") as f:
+                        if is_new:
+                            f.write("time,open,high,low,close,volume\n")
+                        f.write(raw_history)
+                    
+                    logger.success(f"📁 Saved {len(lines)} candles to {filename}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to save history to {filename}: {e}")
+                
+                return # No need to process further if it's just a history batch
+
+            # 1. Market Data
+            symbol = data.get("symbol", "")
+            bid = float(data.get("bid", 0.0))
+            ask = float(data.get("ask", 0.0))
+            is_open = data.get("market") == "OPEN"
+
+            if symbol and bid > 0:
+                market = MarketData(
+                    symbol=symbol,
+                    bid=bid,
+                    ask=ask,
+                    is_open=is_open
+                )
+                events.emit(EventType.PRICE_UPDATE, market)
+
+            # 2. Account Data
+            if "balance" in data:
+                account = AccountData(
+                    name=data.get("name", "MT5 Account"),
+                    balance=float(data.get("balance", 0.0)),
+                    equity=float(data.get("equity", 0.0)),
+                    margin=float(data.get("margin", 0.0)),
+                    free_margin=float(data.get("free_margin", 0.0)),
+                    profit=float(data.get("profit", 0.0))
+                )
+                events.emit(EventType.ACCOUNT_UPDATE, account)
+
+        except Exception as e:
+            logger.warning(f"Error parsing MT5 data: {e}")
+
     def log_message(self, format, *args):
-        # Suppress default server logging
+        # Suppress HTTP server console logs
         return
 
 def start_server():
-    server = HTTPServer((config.HOST, config.PORT), MT5Handler)
-    state.log(f"🚀 Server started on {config.HOST}:{config.PORT}", "info")
-    server.serve_forever()
+    try:
+        server = HTTPServer((config.HOST, config.PORT), MT5Handler)
+        logger.info(f"API Server listening on {config.HOST}:{config.PORT}")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"Failed to start server: {e}")
