@@ -39,7 +39,8 @@ class MT5Handler(BaseHTTPRequestHandler):
         # Pulse check log (Only every 60 seconds for a quiet console)
         from .state import state
         if time.time() - state.last_heartbeat > 60:
-             logger.debug(f"🔵 Data Pulse: {data_dict.get('symbol')} @ {data_dict.get('bid')}")
+             market_status = data_dict.get('market', 'UNKNOWN')
+             logger.debug(f"🔵 Data Pulse: {data_dict.get('symbol')} | {data_dict.get('bid')} | Status: {market_status}")
              state.last_heartbeat = time.time()
 
         self._process_data(data_dict)
@@ -112,9 +113,27 @@ class MT5Handler(BaseHTTPRequestHandler):
                     equity=float(data.get("equity", 0.0)),
                     margin=float(data.get("margin", 0.0)),
                     free_margin=float(data.get("free_margin", 0.0)),
-                    profit=float(data.get("profit", 0.0))
+                    profit=float(data.get("profit", 0.0)),
+                    position_count=int(data.get("pos_count", 0))
                 )
                 events.emit(EventType.ACCOUNT_UPDATE, account)
+            
+            # 3. Positions Data (Ticket, Profit)
+            if "positions" in data:
+                raw_pos = data["positions"]
+                positions_list = []
+                if raw_pos.strip():
+                    parts = raw_pos.strip().split("|")
+                    from .models.data_models import PositionData
+                    for p in parts:
+                        if not p: continue
+                        fields = p.split(":")
+                        if len(fields) >= 2:
+                            positions_list.append(PositionData(
+                                ticket=int(fields[0]),
+                                profit=float(fields[1])
+                            ))
+                events.emit(EventType.POSITIONS_UPDATE, positions_list)
 
         except Exception as e:
             logger.warning(f"Error parsing MT5 data: {e}")

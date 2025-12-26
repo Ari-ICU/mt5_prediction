@@ -9,6 +9,7 @@ class EventType(Enum):
     LOG_MESSAGE = auto()
     TRADE_COMMAND = auto()
     SETTINGS_CHANGE = auto()
+    POSITIONS_UPDATE = auto()
 
 class EventManager:
     """A simple Pub/Sub event dispatcher to decouple system components."""

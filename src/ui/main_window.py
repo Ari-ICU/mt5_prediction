@@ -29,6 +29,10 @@ class MainWindow:
         self.default_symbol_var = tk.StringVar(value=config.DEFAULT_SYMBOL)
         self.buy_conf_var = tk.StringVar(value="0.75")
         self.sell_conf_var = tk.StringVar(value="0.75")
+        self.profit_target_var = tk.StringVar(value="0.0")
+        self.pos_profit_var = tk.StringVar(value="0.0")
+        self.pos_loss_var = tk.StringVar(value="0.0")
+        self.max_pos_var = tk.StringVar(value="5")
         
         # Data Sync Variables
         self.sync_timeframe = tk.StringVar(value="H1")
@@ -47,7 +51,7 @@ class MainWindow:
         events.subscribe(EventType.CONNECTION_CHANGE, self._on_connection_change)
         
         # Bind Settings Changes
-        for var in [self.lot_var, self.sl_var, self.tp_var, self.auto_trade_var, self.buy_conf_var, self.sell_conf_var]:
+        for var in [self.lot_var, self.sl_var, self.tp_var, self.auto_trade_var, self.buy_conf_var, self.sell_conf_var, self.profit_target_var, self.max_pos_var, self.pos_profit_var, self.pos_loss_var]:
             var.trace_add("write", self._broadcast_settings)
 
     def _broadcast_settings(self, *args):
@@ -57,6 +61,10 @@ class MainWindow:
                 sl=float(self.sl_var.get() or 0),
                 tp=float(self.tp_var.get() or 0),
                 auto_trade=self.auto_trade_var.get(),
+                auto_profit_close=float(self.profit_target_var.get() or 0.0),
+                pos_profit_limit=float(self.pos_profit_var.get() or 0.0),
+                pos_loss_limit=float(self.pos_loss_var.get() or 0.0),
+                max_positions=int(self.max_pos_var.get() or 5),
                 buy_threshold=float(self.buy_conf_var.get() or 0.75),
                 sell_threshold=float(self.sell_conf_var.get() or 0.75)
             )
@@ -157,7 +165,11 @@ class MainWindow:
         settings_frame.pack(fill="x")
         
         self._create_input_field(settings_frame, "BUY CONFIDENCE (0.0-1.0)", self.buy_conf_var).pack(side="left", padx=(0, 20))
-        self._create_input_field(settings_frame, "SELL CONFIDENCE (0.0-1.0)", self.sell_conf_var).pack(side="left")
+        self._create_input_field(settings_frame, "SELL CONFIDENCE (0.0-1.0)", self.sell_conf_var).pack(side="left", padx=(0, 20))
+        self._create_input_field(settings_frame, "TOT. PROFIT ($)", self.profit_target_var).pack(side="left", padx=(0, 20))
+        self._create_input_field(settings_frame, "POS. PROFIT ($)", self.pos_profit_var).pack(side="left", padx=(0, 20))
+        self._create_input_field(settings_frame, "POS. LOSS ($)", self.pos_loss_var).pack(side="left", padx=(0, 20))
+        self._create_input_field(settings_frame, "LIMIT", self.max_pos_var).pack(side="left")
 
     def _setup_config_tab(self):
         container = tk.Frame(self.config_tab, bg=config.THEME_COLOR)
@@ -305,6 +317,40 @@ class MainWindow:
         self.lbl_bid = self._create_price_box(prices, "BID", config.ACCENT_RED, 0)
         self.lbl_ask = self._create_price_box(prices, "ASK", config.ACCENT_GREEN, 1)
 
+        # AI Insights Row
+        ai_frame = tk.Frame(card, bg=config.CARD_BG)
+        ai_frame.pack(fill="x", pady=(20, 0))
+        
+        # Left side: Prediction
+        pred_box = tk.Frame(ai_frame, bg=config.CARD_BG)
+        pred_box.pack(side="left", fill="both", expand=True)
+        tk.Label(pred_box, text="AI PREDICTION", font=(config.FONT_MAIN, 10, "bold"), 
+                 fg=config.TEXT_MUTED, bg=config.CARD_BG).pack()
+        self.lbl_ai_pred = tk.Label(pred_box, text="---", font=(config.FONT_MONO, 24, "bold"), 
+                                    fg=config.ACCENT_BLUE, bg=config.CARD_BG)
+        self.lbl_ai_pred.pack()
+
+        # Right side: Confidence
+        conf_box = tk.Frame(ai_frame, bg=config.CARD_BG)
+        conf_box.pack(side="left", fill="both", expand=True)
+        tk.Label(conf_box, text="AI CONFIDENCE", font=(config.FONT_MAIN, 10, "bold"), 
+                 fg=config.TEXT_MUTED, bg=config.CARD_BG).pack()
+        self.lbl_ai_conf = tk.Label(conf_box, text="0.0%", font=(config.FONT_MONO, 24, "bold"), 
+                                    fg=config.TEXT_SECONDARY, bg=config.CARD_BG)
+        self.lbl_ai_conf.pack()
+
+        # Indicators Row
+        ind_frame = tk.Frame(card, bg=config.CARD_BG)
+        ind_frame.pack(fill="x", pady=(15, 0))
+        
+        self.lbl_rsi = tk.Label(ind_frame, text="RSI: --", font=(config.FONT_MONO, 11), 
+                                fg=config.TEXT_MUTED, bg=config.CARD_BG)
+        self.lbl_rsi.pack(side="left", padx=(0, 25))
+        
+        self.lbl_sma = tk.Label(ind_frame, text="SMA10: --", font=(config.FONT_MONO, 11), 
+                                fg=config.TEXT_MUTED, bg=config.CARD_BG)
+        self.lbl_sma.pack(side="left")
+
     def _create_price_box(self, parent, label, color, col):
         box = tk.Frame(parent, bg=config.CARD_BG)
         box.grid(row=0, column=col, sticky="nsew")
@@ -414,6 +460,7 @@ class MainWindow:
         self.lbl_balance = self._create_metric_row(card, "Balance")
         self.lbl_equity = self._create_metric_row(card, "Equity")
         self.lbl_profit = self._create_metric_row(card, "Float P/L")
+        self.lbl_pos_count = self._create_metric_row(card, "Active Trades")
 
         self.cb_auto = tk.Checkbutton(card, text="ENABLE AUTO-TRADING", variable=self.auto_trade_var,
                                       bg=config.CARD_BG, fg=config.ACCENT_BLUE, selectcolor=config.CARD_BG,
@@ -450,6 +497,23 @@ class MainWindow:
         self.lbl_bid.configure(text=f"{market.bid:.5f}")
         self.lbl_ask.configure(text=f"{market.ask:.5f}")
         self.lbl_spread.configure(text=f"SPREAD: {market.spread}")
+        
+        # AI Data Update
+        if hasattr(self, 'lbl_ai_pred'):
+            self.lbl_ai_pred.configure(text=f"{market.prediction:.5f}")
+            # Color prediction based on trend
+            pred_color = config.ACCENT_GREEN if market.prediction >= market.ask else config.ACCENT_RED
+            self.lbl_ai_pred.configure(fg=pred_color)
+            
+            self.lbl_ai_conf.configure(text=f"{market.confidence:.1f}%")
+            # Highlight confidence if it's high enough to trigger a trade
+            conf_color = config.ACCENT_GREEN if market.confidence >= 100 else config.TEXT_SECONDARY
+            self.lbl_ai_conf.configure(fg=conf_color)
+            
+            # Indicators Update
+            if hasattr(self, 'lbl_rsi'):
+                self.lbl_rsi.configure(text=f"RSI: {market.rsi:.2f}")
+                self.lbl_sma.configure(text=f"SMA10: {market.sma10:.2f}")
 
     def _on_account_update(self, account: AccountData):
         self.root.after(0, lambda: self._update_account_ui(account))
@@ -461,6 +525,7 @@ class MainWindow:
         self.lbl_equity.configure(text=f"${acc.equity:,.2f}")
         color = config.ACCENT_GREEN if acc.profit >= 0 else config.ACCENT_RED
         self.lbl_profit.configure(text=f"{acc.profit:+,.2f}", fg=color)
+        self.lbl_pos_count.configure(text=str(acc.position_count))
 
     def _on_log_message(self, data: dict):
         self.root.after(0, lambda: self._insert_log(data))

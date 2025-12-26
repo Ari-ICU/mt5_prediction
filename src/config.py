@@ -46,3 +46,6 @@ FONT_MONO = "SF Mono"
 # Auto Trading Defaults
 BUY_THRESHOLD_DEFAULT = 0.00
 SELL_THRESHOLD_DEFAULT = 0.00
+
+# API Keys
+NEWS_API_KEY = "PASTE_YOUR_API_KEY_HERE" # Get one for free at newsapi.org

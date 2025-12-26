@@ -128,6 +128,18 @@ void OnTimer()
     double profit = AccountInfoDouble(ACCOUNT_PROFIT);
     string name = AccountInfoString(ACCOUNT_NAME);
 
+    // Prepare Positions Data
+    string positions_str = "";
+    int total = PositionsTotal();
+    for(int i=0; i<total; i++)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket))
+        {
+            positions_str += IntegerToString(ticket) + ":" + DoubleToString(PositionGetDouble(POSITION_PROFIT), 2) + "|";
+        }
+    }
+
     // Prepare POST data
     string post_str = "request=next&market=" + marketStatus + 
                       "&symbol=" + _Symbol + 
@@ -138,7 +150,9 @@ void OnTimer()
                       "&margin=" + DoubleToString(margin, 2) + 
                       "&free_margin=" + DoubleToString(free_margin, 2) + 
                       "&profit=" + DoubleToString(profit, 2) + 
-                      "&name=" + name;
+                      "&name=" + name +
+                      "&pos_count=" + IntegerToString(total) +
+                      "&positions=" + positions_str;
     
     SendRequest(post_str, true);
 }
@@ -281,6 +295,13 @@ void ProcessCommand(string cmd)
     double sl_price = (ArraySize(parts) >= 5) ? StringToDouble(parts[3]) : 0;
     double tp_price = (ArraySize(parts) >= 5) ? StringToDouble(parts[4]) : 0;
 
+    if(action == "CLOSE_TICKET")
+    {
+        ulong ticket = (ulong)StringToInteger(parts[1]);
+        CloseTicket(ticket);
+        return;
+    }
+
     if(!SymbolSelect(symbol, true)) { Print("[ERROR] Symbol ", symbol, " not found"); return; }
 
     if(action == "BUY")  Trade(symbol, ORDER_TYPE_BUY, lot, sl_price, tp_price);
@@ -331,17 +352,14 @@ void ProcessCommand(string cmd)
 //+------------------------------------------------------------------+
 bool IsMarketOpen(string symbol)
 {
-    datetime now = TimeTradeServer();
-    MqlDateTime dt;
-    TimeToStruct(now, dt);
-    ENUM_DAY_OF_WEEK day = (ENUM_DAY_OF_WEEK)dt.day_of_week;
+    // Check if the broker explicitly says trading is allowed for this symbol right now
+    ENUM_SYMBOL_TRADE_MODE mode = (ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE);
+    if(mode == SYMBOL_TRADE_MODE_FULL) return true;
+    
+    // Fallback: Check if we have valid prices coming in
+    double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+    if(bid > 0) return true; // If prices are moving, we consider it open for the bot
 
-    datetime from, to;
-    for(int i=0; i<10; i++) 
-    {
-        if(!SymbolInfoSessionTrade(symbol, day, i, from, to)) break; 
-        if(now >= from && now <= to) return true;
-    }
     return false;
 }
 
@@ -395,22 +413,36 @@ void ClosePositions(string symbol, bool profitOnly) {
 }
 
 void CloseTicket(ulong ticket) {
-    MqlTradeRequest req;
-    MqlTradeResult res;
-    ZeroMemory(req); ZeroMemory(res);
+    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) {
+        Print("[CLOSE FAIL] MT5/EA Trading not allowed.");
+        return;
+    }
     
-    if(!PositionSelectByTicket(ticket)) return;
+    if(!PositionSelectByTicket(ticket)) {
+        Print("[CLOSE FAIL] Ticket #", ticket, " not found.");
+        return;
+    }
 
     ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
     string sym = PositionGetString(POSITION_SYMBOL);
+    double vol = PositionGetDouble(POSITION_VOLUME);
+
+    MqlTradeRequest req;
+    MqlTradeResult res;
+    ZeroMemory(req); ZeroMemory(res);
 
     req.action = TRADE_ACTION_DEAL;
     req.position = ticket;
     req.symbol = sym;
-    req.volume = PositionGetDouble(POSITION_VOLUME);
+    req.volume = vol;
+    req.deviation = 50;
+    req.type_filling = ORDER_FILLING_IOC;
     req.type = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
     req.price = (req.type == ORDER_TYPE_BUY) ? SymbolInfoDouble(sym, SYMBOL_ASK) : SymbolInfoDouble(sym, SYMBOL_BID);
     
-    if(!OrderSend(req, res))
-        Print("[CLOSE FAIL] Ticket: ", ticket, " Retcode: ", res.retcode);
+    if(!OrderSend(req, res)) {
+        Print("[CLOSE FAIL] Ticket #", ticket, " Retcode: ", res.retcode, " Error: ", GetLastError());
+    } else {
+        Print("[CLOSE SUCCESS] Ticket #", ticket, " Deal: ", res.deal);
+    }
 }

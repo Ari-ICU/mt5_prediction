@@ -19,6 +19,8 @@ class SimplePredictor:
         self.model = None
         self.features = None
         self.history = [] # Buffer to store recent prices for SMA/RSI calculation
+        self.last_rsi = 50.0
+        self.last_sma10 = 0.0
         
         self._load_model()
 
@@ -42,31 +44,45 @@ class SimplePredictor:
         if len(self.history) > 100:
             self.history.pop(0)
 
-        if self.model and len(self.history) >= 30:
+        if self.model and len(self.history) >= 5:
             try:
                 # Prepare features matches train_model.py
                 prices = pd.Series(self.history)
-                sma10 = prices.rolling(10).mean().iloc[-1]
-                sma30 = prices.rolling(30).mean().iloc[-1]
-                std10 = prices.rolling(10).std().iloc[-1]
+                # Ensure we handle very small windows
+                sma10 = prices.rolling(min(10, len(prices))).mean().iloc[-1]
+                sma30 = prices.rolling(min(30, len(prices))).mean().iloc[-1]
+                std10 = prices.rolling(min(10, len(prices))).std().iloc[-1]
+                if pd.isna(std10): std10 = 0
                 
-                # Simple RSI
-                delta = prices.diff()
-                gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
-                loss = -delta.where(delta < 0, 0).rolling(14).mean().iloc[-1]
-                rsi = 100 - (100 / (1 + (gain/loss))) if loss != 0 else 50
+                # Simple RSI (requires at least 1 gain/loss)
+                if len(prices) >= 14:
+                    delta = prices.diff()
+                    gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
+                    loss = -delta.where(delta < 0, 0).rolling(14).mean().iloc[-1]
+                    rsi = 100 - (100 / (1 + (gain/loss))) if loss != 0 else 50
+                else:
+                    rsi = 50 # Default middle ground during warm-up
                 
-                # Mock volume features (since it's hard to get real-time history for vol)
+                # Mock volume features
                 vol = 100  
                 vol_change = 0
+                
+                self.last_sma10 = sma10
+                self.last_rsi = rsi
                 
                 X = pd.DataFrame([[ask, sma10, sma30, std10, rsi, vol, vol_change]], 
                                  columns=self.features)
                 
                 pred = self.model.predict(X)[0]
+                logger.debug(f"📊 AI Features: Ask={ask:.2f}, SMA10={sma10:.2f}, RSI={rsi:.1f} -> Pred: {pred:.2f}")
                 return float(pred)
             except Exception as e:
+                logger.error(f"Predictor error: {e}")
                 return ask # Fallback to current price on error
         
+        # Log progress if we are collecting data
+        if self.model:
+            logger.info(f"⏳ Collecting AI Data: {len(self.history)}/5 ticks...")
+            
         # Default logic: Small random wander
-        return ask + (np.random.normal(0, 0.1))
+        return ask + (np.random.normal(0, 0.05))

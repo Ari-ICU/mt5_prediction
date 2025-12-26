@@ -16,7 +16,9 @@ class AppState:
         self.is_connected = False
         self.last_heartbeat = 0
         self.pending_command = ""
-        
+        self.positions = []
+        self.last_trade_time = 0 
+        self.sent_closures = {} # {ticket_or_action: timestamp}        
         # Strategy (kept for immediate trigger)
         from src.strategies.simple_strategy import SimpleStrategy
         self.strategy = SimpleStrategy()
@@ -27,9 +29,41 @@ class AppState:
         # Subscribe to internal events to maintain state
         events.subscribe(EventType.PRICE_UPDATE, self._on_price_update)
         events.subscribe(EventType.ACCOUNT_UPDATE, self._on_account_update)
+        events.subscribe(EventType.POSITIONS_UPDATE, self._on_positions_update)
         events.subscribe(EventType.CONNECTION_CHANGE, self._on_connection_change)
         events.subscribe(EventType.SETTINGS_CHANGE, self._on_settings_update)
         events.subscribe(EventType.TRADE_COMMAND, self._on_trade_command)
+
+    def _on_positions_update(self, data: list):
+        self.positions = data
+        
+        # Check for Per-Position Profit/Loss Close
+        if self.settings.pos_profit_limit > 0 or self.settings.pos_loss_limit > 0:
+            if not self.market.is_open:
+                for pos in data:
+                    if (self.settings.pos_profit_limit > 0 and pos.profit >= self.settings.pos_profit_limit) or \
+                       (self.settings.pos_loss_limit > 0 and pos.profit <= -self.settings.pos_loss_limit):
+                        if int(time.time()) % 60 == 0:
+                            logger.warning(f"🕒 Market Closed: Ticket #{pos.ticket} hit target (${pos.profit:.2f}), will close on market open.")
+                return 
+
+            now = time.time()
+            for pos in data:
+                # 1. Profit Target
+                if self.settings.pos_profit_limit > 0 and pos.profit >= self.settings.pos_profit_limit:
+                    if pos.ticket in self.sent_closures and now - self.sent_closures[pos.ticket] < 10:
+                        continue
+                    logger.success(f"🎯 Position Profit Target Hit! (Ticket {pos.ticket}: ${pos.profit:.2f} >= ${self.settings.pos_profit_limit:.2f})")
+                    self.sent_closures[pos.ticket] = now
+                    self._on_trade_command({"action": "CLOSE_TICKET", "ticket": pos.ticket})
+
+                # 2. Loss Target (pos_loss_limit is positive in UI, so check if profit <= -limit)
+                elif self.settings.pos_loss_limit > 0 and pos.profit <= -self.settings.pos_loss_limit:
+                    if pos.ticket in self.sent_closures and now - self.sent_closures[pos.ticket] < 10:
+                        continue
+                    logger.warning(f"🛑 Position Loss Limit Hit! (Ticket {pos.ticket}: ${pos.profit:.2f} <= -${self.settings.pos_loss_limit:.2f})")
+                    self.sent_closures[pos.ticket] = now
+                    self._on_trade_command({"action": "CLOSE_TICKET", "ticket": pos.ticket})
 
     def _on_price_update(self, data: MarketData):
         self.market = data
@@ -43,6 +77,20 @@ class AppState:
 
     def _on_account_update(self, data: AccountData):
         self.account = data
+        # Check for Auto Profit Close
+        if self.settings.auto_profit_close > 0 and data.profit >= self.settings.auto_profit_close:
+            if not self.market.is_open:
+                if int(time.time()) % 60 == 0:
+                    logger.warning(f"🕒 Market Closed: Account hit profit target (${data.profit:.2f}), will close on market open.")
+                return
+                
+            now = time.time()
+            if "CLOSE_ALL" in self.sent_closures and now - self.sent_closures["CLOSE_ALL"] < 10:
+                return
+                
+            logger.success(f"💰 Profit Target Hit! (${data.profit:.2f} >= ${self.settings.auto_profit_close:.2f})")
+            self.sent_closures["CLOSE_ALL"] = now
+            self._on_trade_command({"action": "CLOSE_ALL"})
 
     def _on_connection_change(self, status: bool):
         if status and not self.is_connected:
@@ -86,18 +134,58 @@ class AppState:
             logger.info(f"Queued Range Sync: {symbol} {tf} ({start} to {end})")
             return
 
+        if action == "CLOSE_TICKET":
+            ticket = cmd_data.get("ticket", 0)
+            self.pending_command = f"CLOSE_TICKET|{ticket}|0|0|0"
+            logger.info(f"Queued Close Ticket: #{ticket}")
+            return
+
         lot = cmd_data.get("lot", self.settings.lot)
         sl = cmd_data.get("sl", self.settings.sl)
         tp = cmd_data.get("tp", self.settings.tp)
         
+        if action.startswith("CLOSE"):
+            now = time.time()
+            key = f"{action}_{cmd_data.get('ticket', '')}"
+            if key in self.sent_closures and now - self.sent_closures[key] < 5:
+                return
+            self.sent_closures[key] = now
+
         self.pending_command = f"{action}|{symbol}|{lot}|{sl}|{tp}"
         logger.info(f"Queued Order: {action} {lot} {symbol}")
 
     def evaluate_strategy(self):
-        if not self.market.is_open:
-            return
-
+        """Processes AI strategy and emits signals.
+        Note: Automated trade commands are only emitted if the market is OPEN.
+        Includes a 30-second cooldown between automated signals.
+        """
         try:
+            # 1. ALWAYS calculate AI Prediction for UI display (Even if market closed)
+            if self.predictor:
+                pred_price = self.predictor.predict_price({
+                    "current_bid": self.market.bid,
+                    "current_ask": self.market.ask
+                })
+                self.market.prediction = pred_price
+                self.market.rsi = self.predictor.last_rsi
+                self.market.sma10 = self.predictor.last_sma10
+                
+                # Calculate confidence
+                buy_threshold = float(self.settings.buy_threshold or 0.75)
+                sell_threshold = float(self.settings.sell_threshold or 0.75)
+                delta = pred_price - self.market.ask
+                
+                if delta > 0 and buy_threshold > 0:
+                    self.market.confidence = (delta / buy_threshold) * 100
+                elif delta < 0 and sell_threshold > 0:
+                    self.market.confidence = (abs(delta) / sell_threshold) * 100
+                else:
+                    self.market.confidence = 0
+
+            # 2. Market Status Awareness
+            is_closed = not self.market.is_open
+
+            # 3. Decision Matrix 
             state_dict = {
                 "current_symbol": self.market.symbol,
                 "current_bid": self.market.bid,
@@ -105,14 +193,32 @@ class AppState:
                 "market_is_open": self.market.is_open,
                 "predictor": self.predictor,
                 "buy_threshold": self.settings.buy_threshold,
-                "sell_threshold": self.settings.sell_threshold
+                "sell_threshold": self.settings.sell_threshold,
+                "ai_prediction": self.market.prediction, 
+                "ai_confidence": self.market.confidence
             }
             
             decision = self.strategy.run(state_dict)
             
             if decision in ["BUY", "SELL"]:
-                logger.info(f"🤖 Strategy Signal: {decision}")
+                # 4. Filter Limits (Max Positions)
+                if self.account.position_count >= self.settings.max_positions:
+                    if int(time.time()) % 60 == 0:
+                        logger.warning(f"🔔 Trade Limit: {self.account.position_count}/{self.settings.max_positions} active. Signal skipped.")
+                    return
+
+                # 5. Cooldown (30s)
+                now = time.time()
+                if now - self.last_trade_time < 30:
+                    return
+
+                logger.success(f"🤖 AI SIGNAL DETECTED: {decision} on {self.market.symbol}")
+                self.last_trade_time = now
                 events.emit(EventType.TRADE_COMMAND, {"action": decision})
+            else:
+                # Optional: Log small updates for HOLD to show activity
+                if int(time.time()) % 30 == 0:
+                    logger.debug(f"Strategy Activity: AI is analyzing {self.market.symbol} (Decision: HOLD)")
                 
         except Exception as e:
             logger.error(f"Strategy runtime error: {e}")
