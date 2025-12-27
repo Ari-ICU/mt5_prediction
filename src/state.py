@@ -19,6 +19,8 @@ class AppState:
         self.positions = []
         self.last_trade_time = 0 
         self.sent_closures = {} # {ticket_or_action: timestamp}        
+        self.available_symbols = [] # From MT5 Market Watch
+
         # Strategy (kept for immediate trigger)
         from src.strategies.simple_strategy import SimpleStrategy
         self.strategy = SimpleStrategy()
@@ -33,6 +35,12 @@ class AppState:
         events.subscribe(EventType.CONNECTION_CHANGE, self._on_connection_change)
         events.subscribe(EventType.SETTINGS_CHANGE, self._on_settings_update)
         events.subscribe(EventType.TRADE_COMMAND, self._on_trade_command)
+        events.subscribe(EventType.SYMBOLS_AVAILABLE, self._on_symbols_available)
+
+    def _on_symbols_available(self, syms: list):
+        if syms != self.available_symbols:
+            self.available_symbols = syms
+            # logger.debug(f"Updated symbols list: {len(syms)} symbols found.")
 
     def _on_positions_update(self, data: list):
         self.positions = data
@@ -113,11 +121,21 @@ class AppState:
         if self.settings.lot != settings.lot:
             logger.info(f"⚙️ Global Lot updated to: {settings.lot}")
 
+        if self.settings.symbol != settings.symbol and settings.symbol:
+            logger.info(f"💱 Symbol changed to: {settings.symbol}")
+            # Reset predictor history on symbol change to avoid mixed data
+            if self.predictor:
+                self.predictor.history = []
+            
+            # Optionally tell MT5 to change symbol if supported by EA
+            self.pending_command = f"CHANGE_SYMBOL|{settings.symbol}|0|0|0"
+
         self.settings = settings
 
     def _on_trade_command(self, cmd_data: dict):
         action = cmd_data.get("action")
-        symbol = cmd_data.get("symbol", self.market.symbol)
+        # Prioritize settings symbol if available, fallback to market symbol
+        symbol = cmd_data.get("symbol") or self.settings.symbol or self.market.symbol
         
         if action == "DATA_SYNC":
             tf = cmd_data.get("tf", "H1")
@@ -138,6 +156,14 @@ class AppState:
             ticket = cmd_data.get("ticket", 0)
             self.pending_command = f"CLOSE_TICKET|{ticket}|0|0|0"
             logger.info(f"Queued Close Ticket: #{ticket}")
+            return
+
+        if action == "MODIFY_TICKET":
+            ticket = cmd_data.get("ticket", 0)
+            sl = cmd_data.get("sl", self.settings.sl)
+            tp = cmd_data.get("tp", self.settings.tp)
+            self.pending_command = f"MODIFY_TICKET|{ticket}|0|{sl}|{tp}"
+            logger.info(f"Queued Modify Ticket: #{ticket} (SL:{sl} TP:{tp})")
             return
 
         lot = cmd_data.get("lot", self.settings.lot)
@@ -195,10 +221,16 @@ class AppState:
                 "buy_threshold": self.settings.buy_threshold,
                 "sell_threshold": self.settings.sell_threshold,
                 "ai_prediction": self.market.prediction, 
-                "ai_confidence": self.market.confidence
+                "ai_confidence": self.market.confidence,
+                "rsi": self.market.rsi,
+                "sma10": self.market.sma10
             }
             
             decision = self.strategy.run(state_dict)
+            
+            # Normalize confidence for UI display (cap at 100%)
+            display_conf = min(self.market.confidence, 100.0)
+            self.market.confidence = display_conf
             
             if decision in ["BUY", "SELL"]:
                 # 4. Filter Limits (Max Positions)
@@ -214,7 +246,16 @@ class AppState:
 
                 logger.success(f"🤖 AI SIGNAL DETECTED: {decision} on {self.market.symbol}")
                 self.last_trade_time = now
-                events.emit(EventType.TRADE_COMMAND, {"action": decision})
+                
+                # Conditional SL/TP
+                sl_val = self.settings.sl if self.settings.auto_sl_tp else 0.0
+                tp_val = self.settings.tp if self.settings.auto_sl_tp else 0.0
+                
+                events.emit(EventType.TRADE_COMMAND, {
+                    "action": decision,
+                    "sl": sl_val,
+                    "tp": tp_val
+                })
             else:
                 # Optional: Log small updates for HOLD to show activity
                 if int(time.time()) % 30 == 0:

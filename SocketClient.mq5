@@ -140,6 +140,14 @@ void OnTimer()
         }
     }
 
+    // Get all symbols from Market Watch
+    string symbols_list = "";
+    int sym_count = SymbolsTotal(true);
+    for(int i=0; i<sym_count; i++)
+    {
+        symbols_list += SymbolName(i, true) + (i < sym_count - 1 ? "," : "");
+    }
+
     // Prepare POST data
     string post_str = "request=next&market=" + marketStatus + 
                       "&symbol=" + _Symbol + 
@@ -152,7 +160,8 @@ void OnTimer()
                       "&profit=" + DoubleToString(profit, 2) + 
                       "&name=" + name +
                       "&pos_count=" + IntegerToString(total) +
-                      "&positions=" + positions_str;
+                      "&positions=" + positions_str +
+                      "&all_symbols=" + symbols_list;
     
     SendRequest(post_str, true);
 }
@@ -301,6 +310,31 @@ void ProcessCommand(string cmd)
         CloseTicket(ticket);
         return;
     }
+    
+    if(action == "MODIFY_TICKET")
+    {
+        ulong ticket = (ulong)StringToInteger(parts[1]);
+        double sl = (ArraySize(parts) >= 4) ? StringToDouble(parts[3]) : 0;
+        double tp = (ArraySize(parts) >= 5) ? StringToDouble(parts[4]) : 0;
+        ModifyTicket(ticket, sl, tp);
+        return;
+    }
+
+    if(action == "CHANGE_SYMBOL")
+    {
+        if(symbol != _Symbol && symbol != "")
+        {
+            Print("💱 Python requested symbol change to: ", symbol);
+            if(SymbolSelect(symbol, true))
+            {
+                if(!ChartSetSymbolPeriod(0, symbol, _Period))
+                    Print("[ERROR] ChartSetSymbolPeriod failed for ", symbol, ". Error: ", GetLastError());
+            }
+            else
+                Print("[ERROR] Symbol ", symbol, " not available in Market Watch: ", symbol);
+        }
+        return;
+    }
 
     if(!SymbolSelect(symbol, true)) { Print("[ERROR] Symbol ", symbol, " not found"); return; }
 
@@ -371,8 +405,23 @@ void Trade(string symbol, ENUM_ORDER_TYPE type, double lot, double sl, double tp
     if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) return;
     if(!TestingMode && !IsMarketOpen(symbol)) return;
 
-    double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(symbol, SYMBOL_ASK) : SymbolInfoDouble(symbol, SYMBOL_BID);
+    double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+    double price = (type == ORDER_TYPE_BUY) ? ask : bid;
     
+    // Safety: Adjust SL/TP if they are invalid or too close (Retcode 10016)
+    double stopLevel = SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+    if(stopLevel <= 0) stopLevel = 100 * _Point; // Default if broker hides it
+
+    if(sl > 0) {
+        if(type == ORDER_TYPE_BUY && sl > bid - stopLevel) sl = bid - stopLevel;
+        if(type == ORDER_TYPE_SELL && sl < ask + stopLevel) sl = ask + stopLevel;
+    }
+    if(tp > 0) {
+        if(type == ORDER_TYPE_BUY && tp < ask + stopLevel) tp = ask + stopLevel;
+        if(type == ORDER_TYPE_SELL && tp > bid - stopLevel) tp = bid - stopLevel;
+    }
+
     MqlTradeRequest req;
     MqlTradeResult res;
     ZeroMemory(req); ZeroMemory(res);
@@ -388,7 +437,7 @@ void Trade(string symbol, ENUM_ORDER_TYPE type, double lot, double sl, double tp
     req.type_filling = ORDER_FILLING_IOC;
 
     if(!OrderSend(req, res))
-        Print("[TRADE ERROR] ", symbol, " ", EnumToString(type), " Failed - Retcode: ", res.retcode);
+        Print("[TRADE ERROR] ", symbol, " ", EnumToString(type), " Failed - Retcode: ", res.retcode, " (SL:", sl, " TP:", tp, ")");
     else
         Print("[TRADE SUCCESS] ", symbol, " ", EnumToString(type), " - Deal: ", res.deal);
 }
@@ -445,4 +494,24 @@ void CloseTicket(ulong ticket) {
     } else {
         Print("[CLOSE SUCCESS] Ticket #", ticket, " Deal: ", res.deal);
     }
+}
+
+void ModifyTicket(ulong ticket, double sl, double tp) {
+    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) return;
+    if(!PositionSelectByTicket(ticket)) return;
+
+    MqlTradeRequest req;
+    MqlTradeResult res;
+    ZeroMemory(req); ZeroMemory(res);
+
+    req.action = TRADE_ACTION_SLTP;
+    req.position = ticket;
+    req.symbol = PositionGetString(POSITION_SYMBOL);
+    req.sl = sl;
+    req.tp = tp;
+    
+    if(!OrderSend(req, res))
+        Print("[MODIFY FAIL] Ticket #", ticket, " Retcode: ", res.retcode, " Error: ", GetLastError());
+    else
+        Print("[MODIFY SUCCESS] Ticket #", ticket);
 }

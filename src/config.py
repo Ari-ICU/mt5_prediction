@@ -6,7 +6,8 @@ PORT = 5555
 ENDPOINT = "/trade"
 
 # Trading Defaults
-DEFAULT_SYMBOL = "XAUUSD"
+DEFAULT_SYMBOL = "XAUUSDm"
+SYMBOL_OPTIONS = ["XAUUSDm", "BTCUSDm", "EURUSDm", "GBPUSDm", "USDJPYm", "ETHUSDm"]
 DEFAULT_LOT_SIZE = "0.01"
 DEFAULT_SL = "0"
 DEFAULT_TP = "0"
@@ -48,4 +49,4 @@ BUY_THRESHOLD_DEFAULT = 0.00
 SELL_THRESHOLD_DEFAULT = 0.00
 
 # API Keys
-NEWS_API_KEY = "PASTE_YOUR_API_KEY_HERE" # Get one for free at newsapi.org
+NEWS_API_KEY = "06a1bc830ebe4303b34a966cc8a50e26" # Get one for free at newsapi.org

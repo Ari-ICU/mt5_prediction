@@ -7,16 +7,20 @@ import time
 from .. import config
 from ..core.logger import logger
 
-_news_cache = {"data": [], "last_fetch": 0}
+_news_cache = {} # {symbol: {"data": [], "last_fetch": 0}}
 
 def fetch_news(symbol: str) -> list:
     """Fetch recent news items for the given symbol using NewsAPI.
     Returns a list of strings (headlines).
     """
+    symbol = symbol.upper()
     now = time.time()
+    
     # Cache news for 30 minutes to avoid API limit (free tier)
-    if now - _news_cache["last_fetch"] < 1800 and _news_cache["data"]:
-        return _news_cache["data"]
+    if symbol in _news_cache:
+        cache = _news_cache[symbol]
+        if now - cache["last_fetch"] < 1800:
+            return cache["data"]
 
     if not config.NEWS_API_KEY or "PASTE_YOUR" in config.NEWS_API_KEY:
         return []
@@ -30,8 +34,7 @@ def fetch_news(symbol: str) -> list:
         if response.status_code == 200:
             articles = response.json().get("articles", [])
             headlines = [a.get("title", "") for a in articles]
-            _news_cache["data"] = headlines
-            _news_cache["last_fetch"] = now
+            _news_cache[symbol] = {"data": headlines, "last_fetch": now}
             logger.info(f"📰 Fetched {len(headlines)} fresh news headlines for {symbol}")
             return headlines
         else:

@@ -16,79 +16,71 @@ class SimpleStrategy(StrategyBase):
     def run(self, state: dict) -> str:
         market_open = state.get("market_is_open", False)
         
-        # 1. Primary Signal: AI Price Prediction (Now uses pre-calculated data from state)
-        predictor = state.get("predictor")
-        buy_threshold = float(state.get("buy_threshold", 0.75))
-        sell_threshold = float(state.get("sell_threshold", 0.75))
+        # 1. Load Settings
+        # UI Threshold (0.0-1.0) is converted to Percentage (0-100)
+        buy_threshold = float(state.get("buy_threshold", 0.75)) * 100
+        sell_threshold = float(state.get("sell_threshold", 0.75)) * 100
         
         predicted_price = state.get("ai_prediction", 0)
-        conf_pct = state.get("ai_confidence", 0)
+        base_conf = state.get("ai_confidence", 0)
         current_price = state.get("current_ask", 0)
         price_delta = predicted_price - current_price
         
-        ai_decision = "HOLD"
-        
-        if predictor and predicted_price > 0:
-            try:
-                log_msg = f"🤖 AI Confidence: {conf_pct:.1f}% | Pred: {predicted_price:.2f} (Δ {price_delta:+.2f})"
-                
-                if market_open:
-                    if conf_pct >= 100:
-                        logger.success(log_msg)
-                    else:
-                        logger.info(log_msg)
-                
-                if price_delta > buy_threshold:
-                    ai_decision = "BUY"
-                elif price_delta < -sell_threshold:
-                    ai_decision = "SELL"
-                    
-            except Exception as e:
-                logger.error(f"Error in strategy prediction: {e}")
-                pass
-
-        # 2. Secondary Confirmation: Pattern Detection
+        # 2. Get Chart Pattern & News
+        predictor = state.get("predictor")
+        state["rsi"] = state.get("rsi", predictor.last_rsi if (predictor and hasattr(predictor, 'last_rsi')) else 50.0)
+        state["sma10"] = state.get("sma10", predictor.last_sma10 if (predictor and hasattr(predictor, 'last_sma10')) else 0.0)
         pattern = detect_pattern(state)
-        if pattern and market_open:
-            logger.debug(f"🔍 Pattern detected: {pattern.upper()}")
-        
-        # 3. News Sentiment Analysis (Fundamental Confirmation)
         headlines = fetch_news(state.get("current_symbol", ""))
-        bullish_keywords = ["surge", "rally", "high", "growth", "positive", "uptrend", "bullish", "jump"]
-        bearish_keywords = ["crash", "drop", "plunge", "crisis", "negative", "low", "dip", "bearish", "fall"]
         
+        # 3. Signal Fusion: Combined Confidence
+        # We start with AI confidence and BOOST it based on what you see on the chart
+        final_conf = base_conf
+        direction = "UP" if price_delta > 0 else "DOWN"
+        
+        # CHART PATTERN BOOST (+30%)
+        # In a trending market, 'overbought' is actually strong BULLISH momentum.
+        if direction == "UP":
+            if pattern in ["bullish", "oversold", "overbought"]:
+                final_conf += 30 
+        elif direction == "DOWN":
+            if pattern in ["bearish", "overbought", "oversold"]:
+                final_conf += 30 
+            
+        # NEWS SENTIMENT BOOST (+15%)
+        bullish_keywords = ["surge", "rally", "high", "growth", "positive", "uptrend", "bullish", "jump", "buy", "gain"]
+        bearish_keywords = ["crash", "drop", "plunge", "crisis", "negative", "low", "dip", "bearish", "fall", "sell", "loss"]
         sentiment_score = 0
         for h in headlines:
             h_lower = h.lower()
-            for k in bullish_keywords:
-                if k in h_lower: sentiment_score += 1
-            for k in bearish_keywords:
-                if k in h_lower: sentiment_score -= 1
-
-        # 4. Final Decision Convergence
-        final_decision = "HOLD"
+            if any(k in h_lower for k in bullish_keywords): sentiment_score += 1
+            if any(k in h_lower for k in bearish_keywords): sentiment_score -= 1
+            
+        if direction == "UP" and sentiment_score > 0: final_conf += 15
+        if direction == "DOWN" and sentiment_score < 0: final_conf += 15
         
-        if ai_decision == "BUY":
-            if pattern in ["bullish", "neutral", ""]:
-                # Check news sentiment (Score < -1 means high bearish news)
-                if sentiment_score < -1:
-                    logger.warning(f"🛑 News Sentiment BLOCKS BUY: Score {sentiment_score}")
-                else:
-                    final_decision = "BUY"
+        # 4. Final Final Signal Generation
+        final_signal = "HOLD"
+        
+        if direction == "UP" and final_conf >= buy_threshold:
+            # Overbought is risky but allowed if AI is extremely confident
+            if pattern == "overbought" and final_conf < 90:
+                logger.warning(f"⚠️ MOMENTUM RISK: RSI is high ({state['rsi']:.1f}). Need >90% conf to BUY. (Current: {final_conf:.1f}%)")
+            else:
+                final_signal = "BUY"
                 
-        elif ai_decision == "SELL":
-            if pattern in ["bearish", "neutral", ""]:
-                # Check news sentiment (Score > 1 means high bullish news)
-                if sentiment_score > 1:
-                    logger.warning(f"🛑 News Sentiment BLOCKS SELL: Score {sentiment_score}")
-                else:
-                    final_decision = "SELL"
+        elif direction == "DOWN" and final_conf >= sell_threshold:
+            # Oversold is risky but allowed if AI is extremely confident
+            if pattern == "oversold" and final_conf < 90:
+                logger.warning(f"⚠️ MOMENTUM RISK: RSI is low ({state['rsi']:.1f}). Need >90% conf to SELL. (Current: {final_conf:.1f}%)")
+            else:
+                final_signal = "SELL"
 
-        if final_decision != "HOLD" and market_open:
-            logger.success(f"🔥 FINAL SIGNAL: {final_decision} (AI + Pattern + News Confirmed)")
-            return final_decision
-            
-        if ai_decision != "HOLD" and final_decision == "HOLD":
-            logger.debug(f"ℹ️ HOLD: {ai_decision} signal filtered by news/patterns.")
-            
-        return "HOLD"
+        # Log factors for the user
+        if market_open:
+            if final_signal != "HOLD":
+                logger.success(f"🔥 FINAL SIGNAL: {final_signal} | Total Conf: {final_conf:.1f}% (AI:{base_conf:.1f}% + {final_conf-base_conf:.0f}% Chart Boost)")
+            elif final_conf > 30: # Only log near-misses or AI decisions
+                 logger.debug(f"ℹ️ HOLD: AI {direction} at {final_conf:.1f}% confidence. (Threshold: {buy_threshold if direction=='UP' else sell_threshold}%)")
+                
+        return final_signal

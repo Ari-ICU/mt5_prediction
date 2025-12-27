@@ -34,6 +34,7 @@ class AccountData:
 
 @dataclass
 class TradeSettings:
+    symbol: str = "XAUUSD"
     lot: float = 0.01
     sl: float = 0.0
     tp: float = 0.0
@@ -41,6 +42,7 @@ class TradeSettings:
     auto_profit_close: float = 0.0 # 0.0 means disabled
     pos_profit_limit: float = 0.0 # 0.0 means disabled
     pos_loss_limit: float = 0.0   # 0.0 means disabled
+    auto_sl_tp: bool = True
     max_positions: int = 5
     buy_threshold: float = 0.75
     sell_threshold: float = 0.75

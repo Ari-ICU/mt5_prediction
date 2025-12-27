@@ -67,15 +67,29 @@ class SimplePredictor:
                 vol = 100  
                 vol_change = 0
                 
+                # Relative/Momentum Features (Must match train_model.py)
+                sma10_ratio = ask / sma10 if sma10 > 0 else 1.0
+                sma30_ratio = ask / sma30 if sma30 > 0 else 1.0
+                vol_pct = (prices.rolling(min(10, len(prices))).std().iloc[-1] / ask) if ask > 0 else 0
+                if pd.isna(vol_pct): vol_pct = 0
+                
+                # return = (now - then) / then
+                ret1 = (prices.iloc[-1] - prices.iloc[-2]) / prices.iloc[-2] if len(prices) >= 2 else 0
+                ret5 = (prices.iloc[-1] - prices.iloc[-5]) / prices.iloc[-5] if len(prices) >= 5 else 0
+                
                 self.last_sma10 = sma10
                 self.last_rsi = rsi
                 
-                X = pd.DataFrame([[ask, sma10, sma30, std10, rsi, vol, vol_change]], 
+                # Order MUST match train_model.py: ['SMA_10_Ratio', 'SMA_30_Ratio', 'Volatility_Pct', 'RSI', 'vol_change', 'Return_1', 'Return_5']
+                X = pd.DataFrame([[sma10_ratio, sma30_ratio, vol_pct, rsi, vol_change, ret1, ret5]], 
                                  columns=self.features)
                 
-                pred = self.model.predict(X)[0]
-                logger.debug(f"📊 AI Features: Ask={ask:.2f}, SMA10={sma10:.2f}, RSI={rsi:.1f} -> Pred: {pred:.2f}")
-                return float(pred)
+                # Model now predicts PERCENTAGE CHANGE (return)
+                pred_return = self.model.predict(X)[0]
+                pred_price = ask * (1 + pred_return)
+                
+                logger.debug(f"📊 AI Return: {pred_return:+.6f} | Speed(M5): {ret5:+.6f} -> Target: {pred_price:.2f}")
+                return float(pred_price)
             except Exception as e:
                 logger.error(f"Predictor error: {e}")
                 return ask # Fallback to current price on error

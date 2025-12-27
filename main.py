@@ -17,6 +17,12 @@ def main():
     # 2. Initialize logic and services
     state.predictor = SimplePredictor()
     logger.info("⚡ AI Trading Engine Initialized")
+    
+    from src import config
+    if config.NEWS_API_KEY and "PASTE_YOUR" not in config.NEWS_API_KEY:
+        logger.info("📰 News API Service: ACTIVE")
+    else:
+        logger.warning("📰 News API Service: DISABLED (No API Key)")
 
     # 3. Start background services
     server_thread = threading.Thread(target=start_server, daemon=True)

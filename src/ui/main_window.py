@@ -32,6 +32,7 @@ class MainWindow:
         self.profit_target_var = tk.StringVar(value="0.0")
         self.pos_profit_var = tk.StringVar(value="0.0")
         self.pos_loss_var = tk.StringVar(value="0.0")
+        self.auto_sl_tp_var = tk.BooleanVar(value=True)
         self.max_pos_var = tk.StringVar(value="5")
         
         # Data Sync Variables
@@ -39,6 +40,10 @@ class MainWindow:
         self.sync_bars = tk.StringVar(value="5000")
         self.sync_start_date = tk.StringVar(value=time.strftime("%Y.%m.%d"))
         self.sync_end_date = tk.StringVar(value=time.strftime("%Y.%m.%d"))
+        self.sync_symbol_var = tk.StringVar(value=config.DEFAULT_SYMBOL)
+        
+        self.last_auto_sl_tp = False
+        self.symbol_combos = [] # Track combos to update values
         
         # Build UI
         self._setup_styles()
@@ -49,14 +54,19 @@ class MainWindow:
         events.subscribe(EventType.ACCOUNT_UPDATE, self._on_account_update)
         events.subscribe(EventType.LOG_MESSAGE, self._on_log_message)
         events.subscribe(EventType.CONNECTION_CHANGE, self._on_connection_change)
+        events.subscribe(EventType.SYMBOLS_AVAILABLE, self._on_symbols_update)
         
         # Bind Settings Changes
-        for var in [self.lot_var, self.sl_var, self.tp_var, self.auto_trade_var, self.buy_conf_var, self.sell_conf_var, self.profit_target_var, self.max_pos_var, self.pos_profit_var, self.pos_loss_var]:
+        for var in [self.lot_var, self.sl_var, self.tp_var, self.auto_trade_var, self.buy_conf_var, self.sell_conf_var, self.profit_target_var, self.max_pos_var, self.pos_profit_var, self.pos_loss_var, self.auto_sl_tp_var, self.default_symbol_var]:
             var.trace_add("write", self._broadcast_settings)
+        
+        # Initial sync
+        self._broadcast_settings()
 
     def _broadcast_settings(self, *args):
         try:
             settings = TradeSettings(
+                symbol=self.default_symbol_var.get(),
                 lot=float(self.lot_var.get() or 0.01),
                 sl=float(self.sl_var.get() or 0),
                 tp=float(self.tp_var.get() or 0),
@@ -64,11 +74,25 @@ class MainWindow:
                 auto_profit_close=float(self.profit_target_var.get() or 0.0),
                 pos_profit_limit=float(self.pos_profit_var.get() or 0.0),
                 pos_loss_limit=float(self.pos_loss_var.get() or 0.0),
+                auto_sl_tp=self.auto_sl_tp_var.get(),
                 max_positions=int(self.max_pos_var.get() or 5),
                 buy_threshold=float(self.buy_conf_var.get() or 0.75),
                 sell_threshold=float(self.sell_conf_var.get() or 0.75)
             )
             events.emit(EventType.SETTINGS_CHANGE, settings)
+            
+            # Auto-generate/Sync logic
+            if settings.auto_sl_tp and not self.last_auto_sl_tp:
+                # 1. Auto-generate values if they are 0
+                if float(self.sl_var.get() or 0) == 0:
+                    self._populate_current_price(self.sl_var)
+                if float(self.tp_var.get() or 0) == 0:
+                    self._populate_current_price(self.tp_var)
+                
+                # 2. Sync to active trades
+                self.root.after(100, self._sync_all_sl_tp)
+                
+            self.last_auto_sl_tp = settings.auto_sl_tp
         except ValueError:
             pass
 
@@ -94,6 +118,14 @@ class MainWindow:
         style.map("TNotebook.Tab", 
                   background=[("selected", config.CARD_BG)], 
                   foreground=[("selected", config.TEXT_PRIMARY)])
+
+        # Combobox Styling
+        style.configure("TCombobox", fieldbackground=config.INPUT_BG, background=config.CARD_BG, 
+                        foreground=config.TEXT_PRIMARY, borderwidth=0, arrowcolor=config.ACCENT_BLUE)
+        self.root.option_add("*TCombobox*Listbox.background", config.INPUT_BG)
+        self.root.option_add("*TCombobox*Listbox.foreground", config.TEXT_PRIMARY)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", config.ACCENT_BLUE)
+        self.root.option_add("*TCombobox*Listbox.font", (config.FONT_MONO, 11))
 
     def _setup_layout(self):
         # Header
@@ -164,12 +196,44 @@ class MainWindow:
         settings_frame = tk.Frame(card, bg=config.CARD_BG)
         settings_frame.pack(fill="x")
         
-        self._create_input_field(settings_frame, "BUY CONFIDENCE (0.0-1.0)", self.buy_conf_var).pack(side="left", padx=(0, 20))
-        self._create_input_field(settings_frame, "SELL CONFIDENCE (0.0-1.0)", self.sell_conf_var).pack(side="left", padx=(0, 20))
-        self._create_input_field(settings_frame, "TOT. PROFIT ($)", self.profit_target_var).pack(side="left", padx=(0, 20))
-        self._create_input_field(settings_frame, "POS. PROFIT ($)", self.pos_profit_var).pack(side="left", padx=(0, 20))
-        self._create_input_field(settings_frame, "POS. LOSS ($)", self.pos_loss_var).pack(side="left", padx=(0, 20))
-        self._create_input_field(settings_frame, "LIMIT", self.max_pos_var).pack(side="left")
+        self._create_input_field(settings_frame, "BUY CONFIDENCE (0.01-1.0)", self.buy_conf_var).pack(side="left", padx=(0, 20))
+        self._create_input_field(settings_frame, "SELL CONFIDENCE (0.01-1.0)", self.sell_conf_var).pack(side="left", padx=(0, 20))
+        
+        # New SL/TP fields for Auto-Trading visibility
+        sl_field = self._create_input_field(settings_frame, "AUTO STOP LOSS", self.sl_var)
+        sl_field.pack(side="left", padx=(0, 20))
+        sl_field.winfo_children()[1].configure(fg=config.ACCENT_RED) # Color the input
+        
+        tp_field = self._create_input_field(settings_frame, "AUTO TAKE PROFIT", self.tp_var)
+        tp_field.pack(side="left", padx=(0, 20))
+        tp_field.winfo_children()[1].configure(fg=config.ACCENT_GREEN) # Color the input
+
+        # Row 2 for Profit Targets
+        targets_frame = tk.Frame(card, bg=config.CARD_BG)
+        targets_frame.pack(fill="x", pady=(20, 0))
+        
+        self._create_input_field(targets_frame, "TOT. PROFIT ($)", self.profit_target_var).pack(side="left", padx=(0, 20))
+        self._create_input_field(targets_frame, "POS. PROFIT ($)", self.pos_profit_var).pack(side="left", padx=(0, 20))
+        self._create_input_field(targets_frame, "POS. LOSS ($)", self.pos_loss_var).pack(side="left", padx=(0, 20))
+        
+        # Auto SL/TP Checkbox
+        sl_tp_check = tk.Checkbutton(
+            targets_frame,
+            text="AUTO SL/TP",
+            variable=self.auto_sl_tp_var,
+            bg=config.CARD_BG,
+            fg=config.ACCENT_BLUE,
+            selectcolor=config.THEME_COLOR,
+            activebackground=config.CARD_BG,
+            activeforeground=config.ACCENT_BLUE,
+            font=(config.FONT_BOLD, 10)
+        )
+        sl_tp_check.pack(side="left", padx=(0, 20))
+        
+        self._create_input_field(targets_frame, "LIMIT", self.max_pos_var).pack(side="left", padx=(0, 20))
+
+        # Sync Button
+        ModernButton(targets_frame, "SYNC SL/TP TO ALL", self._sync_all_sl_tp, config.ACCENT_BLUE, config.TEXT_ON_ACCENT).pack(side="left")
 
     def _setup_config_tab(self):
         container = tk.Frame(self.config_tab, bg=config.THEME_COLOR)
@@ -195,7 +259,7 @@ class MainWindow:
         # Trading Defaults Row
         row2 = tk.Frame(grid, bg=config.CARD_BG)
         row2.pack(fill="x", pady=(20, 10))
-        self._create_input_field(row2, "DEFAULT SYMBOL", self.default_symbol_var).pack(side="left", padx=(0, 20))
+        self._create_combo_field(row2, "DEFAULT SYMBOL", self.default_symbol_var, config.SYMBOL_OPTIONS).pack(side="left", padx=(0, 20))
         
         # Info note
         tk.Label(card, text="Note: Changing Server Settings requires an application restart to take effect.", 
@@ -222,6 +286,11 @@ class MainWindow:
         # Controls
         ctrls = tk.Frame(card, bg=config.CARD_BG)
         ctrls.pack(fill="x", pady=10)
+
+        # Symbol Dropdown
+        sym_frame = tk.Frame(ctrls, bg=config.CARD_BG)
+        sym_frame.pack(side="left", padx=(0, 30))
+        self._create_combo_field(sym_frame, "SYMBOL", self.sync_symbol_var, config.SYMBOL_OPTIONS).pack()
 
         # Timeframe Dropdown
         tf_frame = tk.Frame(ctrls, bg=config.CARD_BG)
@@ -256,9 +325,11 @@ class MainWindow:
         tf = self.sync_timeframe.get()
         start = self.sync_start_date.get()
         end = self.sync_end_date.get()
-        logger.info(f"🛰️ Requesting data from {start} to {end} on {tf} from MT5...")
+        symbol = self.sync_symbol_var.get()
+        logger.info(f"🛰️ Requesting data for {symbol} from {start} to {end} on {tf} from MT5...")
         events.emit(EventType.TRADE_COMMAND, {
             "action": "DATA_SYNC_RANGE",
+            "symbol": symbol,
             "tf": tf,
             "start": start,
             "end": end
@@ -316,6 +387,7 @@ class MainWindow:
         
         self.lbl_bid = self._create_price_box(prices, "BID", config.ACCENT_RED, 0)
         self.lbl_ask = self._create_price_box(prices, "ASK", config.ACCENT_GREEN, 1)
+        # print(f"type of price is: {type(prices)}")
 
         # AI Insights Row
         ai_frame = tk.Frame(card, bg=config.CARD_BG)
@@ -356,7 +428,7 @@ class MainWindow:
         box.grid(row=0, column=col, sticky="nsew")
         tk.Label(box, text=label, font=(config.FONT_MAIN, 10, "bold"), 
                  fg=config.TEXT_MUTED, bg=config.CARD_BG).pack()
-        lbl = tk.Label(box, text="0.00000", font=(config.FONT_MONO, 44, "bold"), 
+        lbl = tk.Label(box, text="0.000", font=(config.FONT_MONO, 44, "bold"), 
                        fg=color, bg=config.CARD_BG)
         lbl.pack()
         return lbl
@@ -371,14 +443,15 @@ class MainWindow:
         inputs = tk.Frame(card, bg=config.CARD_BG)
         inputs.pack(fill="x", pady=(0, 25))
         
+        self._create_combo_field(inputs, "SYMBOL", self.default_symbol_var, config.SYMBOL_OPTIONS).pack(side="left", padx=(0, 15))
         self._create_input_field(inputs, "VOLUME", self.lot_var).pack(side="left", padx=(0, 15))
         
         # Stop Loss Spinbox
-        sl_frame = self._create_spin_field(inputs, "Stop Loss:", self.sl_var)
+        sl_frame = self._create_spin_field(inputs, "SL:", self.sl_var)
         sl_frame.pack(side="left", padx=(0, 15))
         
         # Take Profit Spinbox
-        tp_frame = self._create_spin_field(inputs, "Take Profit:", self.tp_var)
+        tp_frame = self._create_spin_field(inputs, "TP:", self.tp_var)
         tp_frame.pack(side="left")
 
         btns = tk.Frame(card, bg=config.CARD_BG)
@@ -411,6 +484,22 @@ class MainWindow:
                        highlightbackground=config.INPUT_BG, highlightcolor=config.ACCENT_BLUE, 
                        insertbackground="white")
         ent.pack(ipady=8, ipadx=5)
+        
+        # Auto-generate price on click
+        if "STOP LOSS" in label or "TAKE PROFIT" in label:
+            ent.bind("<FocusIn>", lambda e: self._populate_current_price(var))
+            
+        return frame
+
+    def _create_combo_field(self, parent, label, var, options):
+        frame = tk.Frame(parent, bg=config.CARD_BG)
+        tk.Label(frame, text=label, font=(config.FONT_MAIN, 9, "bold"), 
+                 fg=config.TEXT_MUTED, bg=config.CARD_BG).pack(anchor="w", pady=(0, 5))
+        
+        combo = ttk.Combobox(frame, textvariable=var, values=options, width=12, 
+                             font=(config.FONT_MONO, 13))
+        combo.pack(ipady=7)
+        self.symbol_combos.append(combo)
         return frame
 
     def _create_spin_field(self, parent, label, var):
@@ -446,7 +535,17 @@ class MainWindow:
                 # For simplicity, use Mid or Ask.
                 price = state.market.ask if state.market.ask > 0 else state.market.bid
                 if price > 0:
-                    var.set(f"{price:.5f}")
+                    # Smart Auto-offset ($2.00 for Gold)
+                    offset = 2.0 if "XAU" in state.market.symbol else (price * 0.001)
+                    
+                    if var == self.sl_var:
+                        # Default SL to be "behind" the current price
+                        var.set(f"{price - offset:.5f}")
+                    elif var == self.tp_var:
+                        # Default TP to be "ahead" of the current price
+                        var.set(f"{price + offset:.5f}")
+                    else:
+                        var.set(f"{price:.5f}")
         except ValueError:
             pass
 
@@ -494,13 +593,13 @@ class MainWindow:
     def _update_price_ui(self, market: MarketData):
         if not self.lbl_bid.winfo_exists(): return
         self.lbl_symbol.configure(text=market.symbol)
-        self.lbl_bid.configure(text=f"{market.bid:.5f}")
-        self.lbl_ask.configure(text=f"{market.ask:.5f}")
+        self.lbl_bid.configure(text=f"{market.bid:.3f}")
+        self.lbl_ask.configure(text=f"{market.ask:.3f}")
         self.lbl_spread.configure(text=f"SPREAD: {market.spread}")
         
         # AI Data Update
         if hasattr(self, 'lbl_ai_pred'):
-            self.lbl_ai_pred.configure(text=f"{market.prediction:.5f}")
+            self.lbl_ai_pred.configure(text=f"{market.prediction:.3f}")
             # Color prediction based on trend
             pred_color = config.ACCENT_GREEN if market.prediction >= market.ask else config.ACCENT_RED
             self.lbl_ai_pred.configure(fg=pred_color)
@@ -553,5 +652,32 @@ class MainWindow:
         text = "● ONLINE" if connected else "● OFFLINE"
         self.status_pill.configure(fg=color, text=text)
 
+    def _on_symbols_update(self, syms: list):
+        self.root.after(0, lambda: self._update_symbol_lists(syms))
+
+    def _update_symbol_lists(self, syms: list):
+        for combo in self.symbol_combos:
+            if combo.winfo_exists():
+                combo['values'] = syms
+
     def _on_trade_btn(self, action):
         events.emit(EventType.TRADE_COMMAND, {"action": action})
+
+    def _sync_all_sl_tp(self):
+        """Sends modify commands for all currently open positions."""
+        from ..state import state
+        if not state.positions:
+            logger.warning("No open positions to sync.")
+            return
+
+        sl = self.sl_var.get()
+        tp = self.tp_var.get()
+        
+        logger.info(f"🔄 Syncing SL:{sl} TP:{tp} to {len(state.positions)} positions...")
+        for pos in state.positions:
+            events.emit(EventType.TRADE_COMMAND, {
+                "action": "MODIFY_TICKET",
+                "ticket": pos.ticket,
+                "sl": sl,
+                "tp": tp
+            })

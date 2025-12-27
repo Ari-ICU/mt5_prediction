@@ -134,6 +134,12 @@ class MT5Handler(BaseHTTPRequestHandler):
                                 profit=float(fields[1])
                             ))
                 events.emit(EventType.POSITIONS_UPDATE, positions_list)
+            
+            # 4. Available Symbols
+            if "all_symbols" in data:
+                syms = data["all_symbols"].strip().split(",")
+                if syms:
+                    events.emit(EventType.SYMBOLS_AVAILABLE, syms)
 
         except Exception as e:
             logger.warning(f"Error parsing MT5 data: {e}")
