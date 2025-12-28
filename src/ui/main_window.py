@@ -387,29 +387,45 @@ class MainWindow:
         
         self.lbl_bid = self._create_price_box(prices, "BID", config.ACCENT_RED, 0)
         self.lbl_ask = self._create_price_box(prices, "ASK", config.ACCENT_GREEN, 1)
-        # print(f"type of price is: {type(prices)}")
 
-        # AI Insights Row
+        # AI Insights Row (REFACTORED)
         ai_frame = tk.Frame(card, bg=config.CARD_BG)
         ai_frame.pack(fill="x", pady=(20, 0))
+
+        # Row 1: Confidence | Trend | Target
+        row1 = tk.Frame(ai_frame, bg=config.CARD_BG)
+        row1.pack(fill="x")
         
-        # Left side: Prediction
-        pred_box = tk.Frame(ai_frame, bg=config.CARD_BG)
-        pred_box.pack(side="left", fill="both", expand=True)
-        tk.Label(pred_box, text="AI PREDICTION", font=(config.FONT_MAIN, 10, "bold"), 
+        # Left side: Confidence
+        conf_box = tk.Frame(row1, bg=config.CARD_BG)
+        conf_box.pack(side="left", fill="both", expand=True)
+        tk.Label(conf_box, text="AI CONFIDENCE", font=(config.FONT_MAIN, 9, "bold"), 
                  fg=config.TEXT_MUTED, bg=config.CARD_BG).pack()
-        self.lbl_ai_pred = tk.Label(pred_box, text="---", font=(config.FONT_MONO, 24, "bold"), 
+        self.lbl_ai_conf = tk.Label(conf_box, text="0.0%", font=(config.FONT_MONO, 20, "bold"), 
+                                    fg=config.TEXT_SECONDARY, bg=config.CARD_BG)
+        self.lbl_ai_conf.pack()
+
+        # Center: Direction Signal
+        self.lbl_ai_dir = tk.Label(row1, text="WAIT", font=(config.FONT_BOLD, 14, "bold"), 
+                                   fg=config.TEXT_MUTED, bg=config.CARD_BG)
+        self.lbl_ai_dir.pack(side="left", padx=10)
+
+        # Right side: Main Prediction
+        pred_box = tk.Frame(row1, bg=config.CARD_BG)
+        pred_box.pack(side="left", fill="both", expand=True)
+        tk.Label(pred_box, text="AI TARGET (TP3)", font=(config.FONT_MAIN, 9, "bold"), 
+                 fg=config.TEXT_MUTED, bg=config.CARD_BG).pack()
+        self.lbl_ai_pred = tk.Label(pred_box, text="---", font=(config.FONT_MONO, 20, "bold"), 
                                     fg=config.ACCENT_BLUE, bg=config.CARD_BG)
         self.lbl_ai_pred.pack()
 
-        # Right side: Confidence
-        conf_box = tk.Frame(ai_frame, bg=config.CARD_BG)
-        conf_box.pack(side="left", fill="both", expand=True)
-        tk.Label(conf_box, text="AI CONFIDENCE", font=(config.FONT_MAIN, 10, "bold"), 
-                 fg=config.TEXT_MUTED, bg=config.CARD_BG).pack()
-        self.lbl_ai_conf = tk.Label(conf_box, text="0.0%", font=(config.FONT_MONO, 24, "bold"), 
-                                    fg=config.TEXT_SECONDARY, bg=config.CARD_BG)
-        self.lbl_ai_conf.pack()
+        # Row 2: TP Breakdown
+        row2 = tk.Frame(ai_frame, bg=config.CARD_BG)
+        row2.pack(fill="x", pady=(15, 0))
+        
+        self.lbl_tp1 = self._create_tp_box(row2, "TP 1 (Safe)", config.TEXT_SECONDARY)
+        self.lbl_tp2 = self._create_tp_box(row2, "TP 2 (Mid)", config.TEXT_PRIMARY)
+        self.lbl_tp3 = self._create_tp_box(row2, "TP 3 (Max)", config.ACCENT_PURPLE)
 
         # Indicators Row
         ind_frame = tk.Frame(card, bg=config.CARD_BG)
@@ -429,6 +445,16 @@ class MainWindow:
         tk.Label(box, text=label, font=(config.FONT_MAIN, 10, "bold"), 
                  fg=config.TEXT_MUTED, bg=config.CARD_BG).pack()
         lbl = tk.Label(box, text="0.000", font=(config.FONT_MONO, 44, "bold"), 
+                       fg=color, bg=config.CARD_BG)
+        lbl.pack()
+        return lbl
+
+    def _create_tp_box(self, parent, label, color):
+        box = tk.Frame(parent, bg=config.CARD_BG)
+        box.pack(side="left", fill="x", expand=True)
+        tk.Label(box, text=label, font=(config.FONT_MAIN, 8, "bold"), 
+                 fg=config.TEXT_MUTED, bg=config.CARD_BG).pack()
+        lbl = tk.Label(box, text="---", font=(config.FONT_MONO, 12, "bold"), 
                        fg=color, bg=config.CARD_BG)
         lbl.pack()
         return lbl
@@ -599,15 +625,41 @@ class MainWindow:
         
         # AI Data Update
         if hasattr(self, 'lbl_ai_pred'):
-            self.lbl_ai_pred.configure(text=f"{market.prediction:.3f}")
-            # Color prediction based on trend
-            pred_color = config.ACCENT_GREEN if market.prediction >= market.ask else config.ACCENT_RED
-            self.lbl_ai_pred.configure(fg=pred_color)
+            # Prediction
+            self.lbl_ai_pred.configure(text=f"{market.prediction:.2f}")
             
+            # Confidence
             self.lbl_ai_conf.configure(text=f"{market.confidence:.1f}%")
-            # Highlight confidence if it's high enough to trigger a trade
+            # Highlight confidence
             conf_color = config.ACCENT_GREEN if market.confidence >= 100 else config.TEXT_SECONDARY
             self.lbl_ai_conf.configure(fg=conf_color)
+            
+            # Smart TP Calculation Logic
+            curr = market.ask 
+            targ = market.prediction
+            
+            if targ != 0 and curr != 0:
+                delta = targ - curr
+                
+                # Determine Direction
+                if delta > 0:
+                    direction = "BULLISH"
+                    color = config.ACCENT_GREEN
+                else:
+                    direction = "BEARISH"
+                    color = config.ACCENT_RED
+                
+                self.lbl_ai_dir.configure(text=direction, fg=color)
+                self.lbl_ai_pred.configure(fg=color)
+
+                # Calculate TP Levels (33%, 66%, 100%)
+                tp1 = curr + (delta * 0.33)
+                tp2 = curr + (delta * 0.66)
+                tp3 = targ # Main Target
+                
+                self.lbl_tp1.configure(text=f"{tp1:.2f}", fg=color)
+                self.lbl_tp2.configure(text=f"{tp2:.2f}", fg=color)
+                self.lbl_tp3.configure(text=f"{tp3:.2f}", fg=color)
             
             # Indicators Update
             if hasattr(self, 'lbl_rsi'):
