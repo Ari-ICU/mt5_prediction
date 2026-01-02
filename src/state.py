@@ -20,7 +20,7 @@ class AppState:
         self.last_trade_time = 0 
         self.sent_closures = {}      
         self.available_symbols = []
-
+        
         # Strategy
         from src.strategies.simple_strategy import SimpleStrategy
         self.strategy = SimpleStrategy()
