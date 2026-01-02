@@ -152,17 +152,29 @@ def train(symbol=None):
         df[col] = pd.to_numeric(df[col], errors='coerce')
     df = df.dropna()
 
+    # Moving Averages
     df['SMA_10_Ratio'] = df['close'] / df['close'].rolling(window=10).mean()
     df['SMA_30_Ratio'] = df['close'] / df['close'].rolling(window=30).mean()
     df['Volatility_Pct'] = df['close'].rolling(window=10).std() / df['close']
+    
+    # Returns
     df['Return_1'] = df['close'].pct_change(1)
     df['Return_5'] = df['close'].pct_change(5)
     
+    # RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # Stochastic Oscillator (14, 3, 3)
+    # %K = (Current Close - Lowest Low) / (Highest High - Lowest Low) * 100
+    low_14 = df['low'].rolling(window=14).min()
+    high_14 = df['high'].rolling(window=14).max()
+    df['Stoch_K'] = 100 * ((df['close'] - low_14) / (high_14 - low_14))
+    # %D = 3-period SMA of %K
+    df['Stoch_D'] = df['Stoch_K'].rolling(window=3).mean()
     
     df['vol_change'] = df['volume'].pct_change()
     
@@ -170,7 +182,12 @@ def train(symbol=None):
     df['target'] = (df['close'].shift(-1) - df['close']) / df['close']
     df = df.dropna()
     
-    features = ['SMA_10_Ratio', 'SMA_30_Ratio', 'Volatility_Pct', 'RSI', 'vol_change', 'Return_1', 'Return_5']
+    features = [
+        'SMA_10_Ratio', 'SMA_30_Ratio', 'Volatility_Pct', 
+        'RSI', 'Stoch_K', 'Stoch_D', 
+        'vol_change', 'Return_1', 'Return_5'
+    ]
+    
     X = df[features]
     y = df['target']
     

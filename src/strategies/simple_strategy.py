@@ -26,10 +26,14 @@ class SimpleStrategy(StrategyBase):
         current_price = state.get("current_ask", 0)
         price_delta = predicted_price - current_price
         
-        # 2. Get Chart Pattern & News
+        # 2. Get Chart Pattern & News & Indicators
         predictor = state.get("predictor")
+        
+        # Extract indicators from predictor state
         state["rsi"] = state.get("rsi", predictor.last_rsi if (predictor and hasattr(predictor, 'last_rsi')) else 50.0)
-        state["sma10"] = state.get("sma10", predictor.last_sma10 if (predictor and hasattr(predictor, 'last_sma10')) else 0.0)
+        stoch_k = predictor.last_stoch_k if (predictor and hasattr(predictor, 'last_stoch_k')) else 50.0
+        stoch_d = predictor.last_stoch_d if (predictor and hasattr(predictor, 'last_stoch_d')) else 50.0
+        
         pattern = detect_pattern(state)
         headlines = fetch_news(state.get("current_symbol", ""))
         
@@ -47,6 +51,19 @@ class SimpleStrategy(StrategyBase):
             if pattern in ["bearish", "overbought", "oversold"]:
                 final_conf += 30 
             
+        # STOCHASTIC OSCILLATOR BOOST (+10%)
+        # Standard Oversold/Overbought confirmation
+        if direction == "UP":
+            # If Oversold (K < 20) and crossing up, it's a good buy signal
+            if stoch_k < 20:
+                final_conf += 10
+                logger.info(f"📈 Stochastic Oversold (K={stoch_k:.1f}) -> BOOST")
+        elif direction == "DOWN":
+            # If Overbought (K > 80) and crossing down
+            if stoch_k > 80:
+                final_conf += 10
+                logger.info(f"📉 Stochastic Overbought (K={stoch_k:.1f}) -> BOOST")
+
         # NEWS SENTIMENT BOOST (+15%)
         bullish_keywords = ["surge", "rally", "high", "growth", "positive", "uptrend", "bullish", "jump", "buy", "gain"]
         bearish_keywords = ["crash", "drop", "plunge", "crisis", "negative", "low", "dip", "bearish", "fall", "sell", "loss"]
@@ -79,8 +96,8 @@ class SimpleStrategy(StrategyBase):
         # Log factors for the user
         if market_open:
             if final_signal != "HOLD":
-                logger.success(f"🔥 FINAL SIGNAL: {final_signal} | Total Conf: {final_conf:.1f}% (AI:{base_conf:.1f}% + {final_conf-base_conf:.0f}% Chart Boost)")
+                logger.success(f"🔥 FINAL SIGNAL: {final_signal} | Total Conf: {final_conf:.1f}% (AI:{base_conf:.1f}% + {final_conf-base_conf:.0f}% Boosts)")
             elif final_conf > 30: # Only log near-misses or AI decisions
-                 logger.debug(f"ℹ️ HOLD: AI {direction} at {final_conf:.1f}% confidence. (Threshold: {buy_threshold if direction=='UP' else sell_threshold}%)")
+                 logger.debug(f"ℹ️ HOLD: AI {direction} at {final_conf:.1f}% confidence. Stoch: {stoch_k:.1f}")
                 
         return final_signal
