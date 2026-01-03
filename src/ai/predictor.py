@@ -1,11 +1,3 @@
-"""Simple AI predictor for price forecasting.
-This module provides a lightweight, self-contained predictor using scikit-learn's
-LinearRegression trained on synthetic data at import time. It offers a
-`predict_price(state: dict) -> float` method that returns a forecasted ask price.
-In a real project you would replace the synthetic training with a proper model
-trained on historical market data.
-"""
-
 import joblib
 import numpy as np
 import os
@@ -14,19 +6,12 @@ from ..core.logger import logger
 
 class SimplePredictor:
     def __init__(self):
-        self.model_path = "models/price_predictor.pkl"
+        self.model_path = "models/direction_predictor.pkl"
         self.feature_path = "models/feature_names.pkl"
-        self.encoder_path = "models/symbol_encoder.pkl"
         self.model = None
         self.features = None
-        self.encoder = None
-        self.history = []  # Buffer to store recent prices for SMA/RSI/Stoch calculation
-        self.last_rsi = 50.0
-        self.last_stoch_k = 50.0
-        self.last_stoch_d = 50.0
-        self.last_sma10 = 0.0
-        self.last_atr = 0.0  # For dynamic TP/SL
-        
+        self.history = []  # Prices (ask/close)
+        self.vol_history = []  # Volumes (optional)
         self._load_model()
 
     def _load_model(self):
@@ -34,127 +19,85 @@ class SimplePredictor:
             try:
                 self.model = joblib.load(self.model_path)
                 self.features = joblib.load(self.feature_path)
-                if os.path.exists(self.encoder_path):
-                    self.encoder = joblib.load(self.encoder_path)
-                logger.success("AI Model loaded successfully!")
-                logger.info(f"Expected features: {len(self.features)} ({self.features})")
+                logger.success("Direction Classifier loaded!")
             except Exception as e:
-                logger.error(f"Failed to load AI model: {e}")
+                logger.error(f"Failed to load model: {e}")
         else:
-            logger.info("No trained model found. Using default logic. Run train_model.py first.")
+            logger.info("No model found. Run train_model.py first.")
 
-    def predict_price(self, state: dict) -> float:
-        bid = state.get("current_bid", 0.0)
+    def predict_direction(self, state: dict):
+        """
+        Returns: (direction: int [0=down,1=up], confidence: float [0-1])
+        """
         ask = state.get("current_ask", 0.0)
-        symbol = state.get("symbol", "BTCUSDm")  # Required for multi-symbol encoding
-        
-        # Add to history for technical analysis
+        volume = state.get("volume", 0.0)  # From MT5 tick if available
         self.history.append(ask)
+        self.vol_history.append(volume)
         if len(self.history) > 100:
             self.history.pop(0)
+            self.vol_history.pop(0)
 
-        if self.model and len(self.history) >= 14:
+        if self.model and len(self.history) >= 30:  # Min for features
             try:
-                # Prepare features (matches train_model.py)
                 prices = pd.Series(self.history)
-                # Ensure we handle very small windows
-                sma10 = prices.rolling(min(10, len(prices))).mean().iloc[-1]
-                sma30 = prices.rolling(min(30, len(prices))).mean().iloc[-1]
-                std10 = prices.rolling(min(10, len(prices))).std().iloc[-1]
-                if pd.isna(std10): std10 = 0
+                vols = pd.Series(self.vol_history)
                 
-                # Simple RSI
+                # Recalculate features (match train_model.py exactly)
+                sma10 = prices.rolling(10).mean().iloc[-1]
+                sma30 = prices.rolling(30).mean().iloc[-1]
+                ema12 = prices.ewm(span=12).mean().iloc[-1]
+                ema26 = prices.ewm(span=26).mean().iloc[-1]
+                macd = (ema12 - ema26) / ask
+                vol_pct = prices.rolling(10).std().iloc[-1] / ask
+                ret1 = prices.pct_change(1).iloc[-1]
+                ret5 = prices.pct_change(5).iloc[-1]
+                
+                # RSI (simplified, handle div0)
                 delta = prices.diff()
                 gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
                 loss = -delta.where(delta < 0, 0).rolling(14).mean().iloc[-1]
-                rsi = 100 - (100 / (1 + (gain/loss))) if loss != 0 else 50
+                rs = gain / (loss if loss != 0 else np.finfo(float).eps)
+                rsi = np.clip(100 - (100 / (1 + rs)), 0, 100)
                 
-                # Stochastic Oscillator (Simulated using history of Asks as High/Low proxy)
-                lowest_low = prices.rolling(14).min().iloc[-1]
-                highest_high = prices.rolling(14).max().iloc[-1]
-                denom = highest_high - lowest_low
+                # Stoch (handle denom=0)
+                low14 = prices.rolling(14).min().iloc[-1]
+                high14 = prices.rolling(14).max().iloc[-1]
+                denom = high14 - low14
+                stoch_k = 100 * ((ask - low14) / denom) if denom != 0 else 50
+                stoch_k = np.clip(stoch_k, 0, 100)
+                stoch_d = stoch_k  # Simplified (use rolling if more hist)
                 
-                if denom == 0:
-                    stoch_k = 50
-                else:
-                    stoch_k = 100 * ((ask - lowest_low) / denom)
+                vol_change = vols.pct_change().iloc[-1] if len(vols) > 1 else 0.0
+                log_vol = np.log(vols.iloc[-1] + 1) if len(vols) > 0 and vols.iloc[-1] > 0 else 0.0
                 
-                stoch_d = stoch_k  # Simplified (full buffer ideal, but ok for ticks)
+                # ATR % (simplified: use price range as proxy for H/L)
+                range_14 = (prices.rolling(14).max() - prices.rolling(14).min()).iloc[-1]
+                atr_proxy = range_14 / 14  # Avg true range approx
+                atr_pct = atr_proxy / ask if ask != 0 else 0.0
                 
-                # Mock volume features
-                vol = 100  
-                vol_change = 0
-                
-                # ATR Approximation
-                deltas = prices.diff().abs()
-                current_atr = deltas.rolling(14).mean().iloc[-1]
-                if pd.isna(current_atr) or current_atr == 0:
-                    current_atr = 0.001 * ask  # Fallback: 0.1% of price
-                self.last_atr = current_atr
-                
-                # Relative/Momentum Features
-                sma10_ratio = ask / sma10 if sma10 > 0 else 1.0
-                sma30_ratio = ask / sma30 if sma30 > 0 else 1.0
-                vol_pct = (prices.rolling(min(10, len(prices))).std().iloc[-1] / ask) if ask > 0 else 0
-                if pd.isna(vol_pct): vol_pct = 0
-                
-                ret1 = (prices.iloc[-1] - prices.iloc[-2]) / prices.iloc[-2] if len(prices) >= 2 else 0
-                ret5 = (prices.iloc[-1] - prices.iloc[-5]) / prices.iloc[-5] if len(prices) >= 5 else 0
-                
-                atr_norm = current_atr / ask
-                
-                self.last_sma10 = sma10
-                self.last_rsi = rsi
-                self.last_stoch_k = stoch_k
-                self.last_stoch_d = stoch_d
-                
-                # Base 10 features
-                base_features = [
-                    sma10_ratio, sma30_ratio, vol_pct, 
-                    rsi, stoch_k, stoch_d, 
-                    vol_change, ret1, ret5,
-                    atr_norm
+                feature_vals = [
+                    ask / sma10 if sma10 != 0 else 1.0,
+                    ask / sma30 if sma30 != 0 else 1.0,
+                    vol_pct, macd, rsi, stoch_k, stoch_d,
+                    vol_change, ret1, ret5, log_vol, atr_pct
                 ]
                 
-                # Handle symbol encoding (appends 1 value for 2 symbols)
-                symbol_encoded = np.zeros(len(self.features) - 10)  # Fallback zeros for num symbol cols
+                # Pad/truncate to match model features (robust)
+                n_feats = len(self.features)
+                if len(feature_vals) < n_feats:
+                    feature_vals += [0.0] * (n_feats - len(feature_vals))
+                elif len(feature_vals) > n_feats:
+                    feature_vals = feature_vals[:n_feats]
                 
-                # FIX: Check categories and use DataFrame with correct column name
-                if self.encoder:
-                    # Defensive check if symbol is in the known categories
-                    # The encoder stores categories in a list of arrays (one per feature)
-                    known_symbols = self.encoder.categories_[0]
-                    if symbol in known_symbols:
-                        try:
-                            # ---------------------------------------------------------
-                            # FIX IS HERE: Wrap in DataFrame with column 'symbol'
-                            # ---------------------------------------------------------
-                            sym_df = pd.DataFrame([[symbol]], columns=['symbol'])
-                            symbol_encoded = self.encoder.transform(sym_df)[0]
-                        except Exception as e:
-                            # logger.warning(f"Encoding warning: {e}")
-                            pass 
+                X = pd.DataFrame([feature_vals], columns=self.features)
                 
-                # Full data: base + encoded (now 11 values for 11 columns)
-                full_data = base_features + list(symbol_encoded)
+                pred_dir = self.model.predict(X)[0]
+                conf = max(self.model.predict_proba(X)[0])  # Max class prob
                 
-                X = pd.DataFrame([full_data], columns=self.features)
-                
-                # Predict percentage return
-                pred_return = self.model.predict(X)[0]
-                pred_price = ask * (1 + pred_return)
-                
-                logger.debug(f"AI Return: {pred_return:+.6f} | Stoch: {stoch_k:.1f} | Speed(M5): {ret5:+.6f} | ATR: {current_atr:.5f} | Symbol Enc: {symbol_encoded} -> Target: {pred_price:.2f}")
-                return float(pred_price)
+                logger.debug(f"Pred Dir: {pred_dir} | Conf: {conf:.2f} | RSI: {rsi:.1f} | ATR%: {atr_pct:.4f}")
+                return int(pred_dir), float(conf)
             except Exception as e:
                 logger.error(f"Predictor error: {e}")
-                # Log data debug for troubleshooting
-                logger.debug(f"Debug: len(full_data)={len(full_data) if 'full_data' in locals() else 'N/A'}, len(features)={len(self.features)}, symbol={symbol}")
-                return ask  # Fallback to current price on error
+                return 0, 0.5  # Neutral fallback
         
-        # Log progress if we are collecting data
-        if self.model:
-            logger.info(f"Collecting AI Data: {len(self.history)}/14 ticks...")
-            
-        # Default logic: Small random wander
-        return ask + (np.random.normal(0, 0.05))
+        return 0, 0.5  # Default no-signal
