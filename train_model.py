@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import OneHotEncoder
 import joblib
 import os
 import sys
@@ -74,8 +75,8 @@ class PSOOptimizer:
             random_state=42
         )
         
-        # Use TimeSeriesSplit for valid financial validation
-        tscv = TimeSeriesSplit(n_splits=3)
+        # Use TimeSeriesSplit for valid financial validation (increased splits for multi-symbol)
+        tscv = TimeSeriesSplit(n_splits=5)
         scores = []
         
         # Manual Cross-Validation loop
@@ -89,7 +90,7 @@ class PSOOptimizer:
         return np.mean(scores)
 
     def optimize(self):
-        print(f"🐝 Swarm Optimization initialized with {self.n_particles} particles...")
+        print(f"Swarm Optimization initialized with {self.n_particles} particles...")
         
         for i in range(self.n_iterations):
             for particle in self.particles:
@@ -124,33 +125,39 @@ class PSOOptimizer:
 # --- Main Training Pipeline ---
 
 def train(symbol=None):
-    # 1. Determine Symbol and Path
-    if not symbol:
-        if len(sys.argv) > 1:
-            symbol = sys.argv[1].replace("_history.csv", "").replace("dataset/", "")
-        else:
-            if os.path.exists("dataset/BTCUSDm_history.csv"):
-                symbol = "BTCUSDm"
-            else:
-                csv_files = [f for f in os.listdir("dataset") if f.endswith("_history.csv")]
-                if not csv_files:
-                    print("❌ No datasets found in 'dataset/' folder. Please sync data from the UI first.")
-                    return
-                symbol = csv_files[0].replace("_history.csv", "")
-
-    csv_path = f"dataset/{symbol}_history.csv"
-    if not os.path.exists(csv_path):
-        print(f"❌ File {csv_path} not found.")
+    # 1. Auto-Detect All Symbols (or single if specified)
+    csv_files = [f for f in os.listdir("dataset") if f.endswith("_history.csv")]
+    if not csv_files:
+        print("No datasets found in 'dataset/' folder. Please add *_history.csv files.")
         return
-
-    print(f"📊 Loading data for {symbol} from {csv_path}...")
-    df = pd.read_csv(csv_path, on_bad_lines='warn')
+    
+    if symbol:
+        csv_path = f"dataset/{symbol}_history.csv"
+        if not os.path.exists(csv_path):
+            print(f"Specified file {csv_path} not found.")
+            return
+        csv_files = [f"{symbol}_history.csv"]  # Limit to one
+    
+    print(f"Found datasets: {csv_files}")
+    dfs = []
+    for f in csv_files:
+        csv_path = f"dataset/{f}"
+        df = pd.read_csv(csv_path, on_bad_lines='warn')
+        print(f"Loaded {len(df)} rows for {f.replace('_history.csv', '')}")
+        # Add symbol column for multi-asset awareness
+        symbol_name = f.replace('_history.csv', '')
+        df['symbol'] = symbol_name
+        dfs.append(df)
+    
+    # Combine all
+    df = pd.concat(dfs, ignore_index=True)
+    print(f"Combined dataset shape: {df.shape}")
     
     # 2. Feature Engineering
-    print("🛠️ Engineering features...")
+    print("Engineering features...")
     for col in ['open', 'high', 'low', 'close', 'volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-    df = df.dropna()
+    df = df.dropna(subset=['open', 'high', 'low', 'close', 'volume'])
 
     # Moving Averages
     df['SMA_10_Ratio'] = df['close'] / df['close'].rolling(window=10).mean()
@@ -169,48 +176,60 @@ def train(symbol=None):
     df['RSI'] = 100 - (100 / (1 + rs))
     
     # Stochastic Oscillator (14, 3, 3)
-    # %K = (Current Close - Lowest Low) / (Highest High - Lowest Low) * 100
     low_14 = df['low'].rolling(window=14).min()
     high_14 = df['high'].rolling(window=14).max()
     df['Stoch_K'] = 100 * ((df['close'] - low_14) / (high_14 - low_14))
-    # %D = 3-period SMA of %K
     df['Stoch_D'] = df['Stoch_K'].rolling(window=3).mean()
     
     df['vol_change'] = df['volume'].pct_change()
+    
+    # ATR (Average True Range)
+    df['tr'] = np.maximum.reduce([
+        df['high'] - df['low'],
+        np.abs(df['high'] - df['close'].shift()),
+        np.abs(df['low'] - df['close'].shift())
+    ])
+    df['ATR'] = df['tr'].rolling(14).mean()
+    df['ATR_norm'] = df['ATR'] / df['close']
     
     # Target: Next bar return
     df['target'] = (df['close'].shift(-1) - df['close']) / df['close']
     df = df.dropna()
     
+    # One-hot encode symbol for multi-asset
+    encoder = OneHotEncoder(sparse_output=False, drop='first')
+    symbol_encoded = encoder.fit_transform(df[['symbol']])
+    symbol_df = pd.DataFrame(symbol_encoded, columns=[f'symbol_{c}' for c in encoder.get_feature_names_out(['symbol'])])
+    df = pd.concat([df.reset_index(drop=True), symbol_df.reset_index(drop=True)], axis=1)
+    
     features = [
         'SMA_10_Ratio', 'SMA_30_Ratio', 'Volatility_Pct', 
         'RSI', 'Stoch_K', 'Stoch_D', 
-        'vol_change', 'Return_1', 'Return_5'
-    ]
+        'vol_change', 'Return_1', 'Return_5',
+        'ATR_norm'
+    ] + [col for col in df.columns if col.startswith('symbol_')]  # Add encoded symbols
     
     X = df[features]
     y = df['target']
     
     # Split for Final Test (Hold-out set)
-    # We use the first 80% for PSO optimization + Training
     cutoff = int(len(X) * 0.8)
     X_train_opt = X.iloc[:cutoff]
     y_train_opt = y.iloc[:cutoff]
     X_test = X.iloc[cutoff:]
     y_test = y.iloc[cutoff:]
     
-    # 3. Swarm Optimization
-    # Bounds: [n_estimators (50-300), max_depth (5-30), min_samples_split (2-20)]
-    bounds = [(50, 300), (5, 30), (2, 20)]
+    # 3. Swarm Optimization (wider bounds for multi-data)
+    bounds = [(50, 400), (5, 35), (2, 25)]  # Slightly expanded
     
-    print(f"🚀 Launching Swarm Intelligence for Hyperparameter Tuning...")
+    print(f"Launching Swarm Intelligence for Hyperparameter Tuning...")
     pso = PSOOptimizer(n_particles=10, bounds=bounds, n_iterations=5, X=X_train_opt, y=y_train_opt)
     best_params = pso.optimize()
     
-    print(f"✅ Best Parameters Found: {best_params}")
+    print(f"Best Parameters Found: {best_params}")
     
     # 4. Final Training
-    print(f"🏋️ Training final model with optimized parameters...")
+    print(f"Training final model with optimized parameters...")
     model = RandomForestRegressor(
         n_estimators=best_params['n_estimators'],
         max_depth=best_params['max_depth'],
@@ -222,13 +241,18 @@ def train(symbol=None):
     
     # 5. Evaluation
     score = model.score(X_test, y_test)
-    print(f"🏆 Final Test Score (R2): {score:.4f}")
+    print(f"Final Test Score (R2) on Combined Data: {score:.4f}")
     
-    # 6. Save
+    # 6. Save (also save encoder for predictor use)
     os.makedirs("models", exist_ok=True)
     joblib.dump(model, "models/price_predictor.pkl")
     joblib.dump(features, "models/feature_names.pkl")
-    print(f"💾 Optimized Predictor saved to models/price_predictor.pkl")
+    joblib.dump(encoder, "models/symbol_encoder.pkl")
+    print(f"Multi-Symbol Predictor saved to models/price_predictor.pkl")
 
 if __name__ == "__main__":
-    train()
+    # Optional: Pass symbol to train only on one, e.g., python train_model.py BTCUSDm
+    if len(sys.argv) > 1:
+        train(sys.argv[1])
+    else:
+        train()  # All symbols

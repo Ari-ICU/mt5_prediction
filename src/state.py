@@ -55,7 +55,7 @@ class AppState:
                 if self.settings.pos_profit_limit > 0 and pos.profit >= self.settings.pos_profit_limit:
                     if pos.ticket in self.sent_closures and now - self.sent_closures[pos.ticket] < 10:
                         continue
-                    logger.success(f"🎯 Position Profit Target Hit! (Ticket {pos.ticket}: ${pos.profit:.2f})")
+                    logger.success(f"Position Profit Target Hit! (Ticket {pos.ticket}: ${pos.profit:.2f})")
                     self.sent_closures[pos.ticket] = now
                     self._on_trade_command({"action": "CLOSE_TICKET", "ticket": pos.ticket})
 
@@ -63,7 +63,7 @@ class AppState:
                 elif self.settings.pos_loss_limit > 0 and pos.profit <= -self.settings.pos_loss_limit:
                     if pos.ticket in self.sent_closures and now - self.sent_closures[pos.ticket] < 10:
                         continue
-                    logger.warning(f"🛑 Position Loss Limit Hit! (Ticket {pos.ticket}: ${pos.profit:.2f})")
+                    logger.warning(f"Position Loss Limit Hit! (Ticket {pos.ticket}: ${pos.profit:.2f})")
                     self.sent_closures[pos.ticket] = now
                     self._on_trade_command({"action": "CLOSE_TICKET", "ticket": pos.ticket})
 
@@ -85,25 +85,25 @@ class AppState:
             now = time.time()
             if "CLOSE_ALL" in self.sent_closures and now - self.sent_closures["CLOSE_ALL"] < 10:
                 return
-            logger.success(f"💰 Profit Target Hit! (${data.profit:.2f})")
+            logger.success(f"Profit Target Hit! (${data.profit:.2f})")
             self.sent_closures["CLOSE_ALL"] = now
             self._on_trade_command({"action": "CLOSE_ALL"})
 
     def _on_connection_change(self, status: bool):
         self.is_connected = status
         if status:
-            logger.success("🔌 MT5 EA Connection Established!")
+            logger.success("MT5 EA Connection Established!")
             self.last_heartbeat = time.time()
         else:
-            logger.warning("📡 MT5 EA Disconnected")
+            logger.warning("MT5 EA Disconnected")
 
     def _on_settings_update(self, settings: TradeSettings):
         if self.settings.auto_trade != settings.auto_trade:
             status = "ENABLED" if settings.auto_trade else "DISABLED"
-            logger.info(f"🤖 AI Trading Engine {status}")
+            logger.info(f"AI Trading Engine {status}")
         
         if self.settings.symbol != settings.symbol and settings.symbol:
-            logger.info(f"💱 Symbol changed to: {settings.symbol}")
+            logger.info(f"Symbol changed to: {settings.symbol}")
             if self.predictor:
                 self.predictor.history = []
             self.pending_command = f"CHANGE_SYMBOL|{settings.symbol}|0|0|0"
@@ -151,6 +151,7 @@ class AppState:
                 self.market.prediction = pred_price
                 self.market.rsi = self.predictor.last_rsi
                 self.market.sma10 = self.predictor.last_sma10
+                self.market.atr = self.predictor.last_atr  # New: ATR for dynamic levels
                 
                 # --- FIX: Calculate Confidence based on PERCENTAGE Change ---
                 current_price = self.market.ask
@@ -159,7 +160,7 @@ class AppState:
                     
                     # Convert UI Threshold (e.g. 0.75) to a comparable scale
                     # If user inputs 0.75, they usually mean 0.075% or similar depending on your UI scaling.
-                    # Assuming UI sends '0.75' to represent 0.075% movement required:
+                    # Assuming UI sends '0.75' to represent 0.075% movement required for 100% confidence.
                     # Let's assume Buy Threshold of 1.0 = 0.1% price move required for 100% confidence.
                     
                     target_move_pct = (float(self.settings.buy_threshold or 0.75) / 1000.0) # 0.75 -> 0.00075 (0.075%)
@@ -195,9 +196,14 @@ class AppState:
             
             # 3. Execution
             if decision in ["BUY", "SELL"]:
+                # New: Enhanced Filter - Skip if confidence too low for better win rate
+                if self.market.confidence < 80.0:
+                    logger.info(f"Signal filtered: {decision} (Conf: {self.market.confidence:.1f}%) - Below 80% threshold")
+                    return
+                
                 if self.account.position_count >= self.settings.max_positions:
                     if int(time.time()) % 60 == 0:
-                        logger.warning(f"🔔 Trade Limit Reached. Signal skipped.")
+                        logger.warning(f"Trade Limit Reached. Signal skipped.")
                     return
 
                 # Cooldown
@@ -205,13 +211,27 @@ class AppState:
                 if now - self.last_trade_time < 30:
                     return
 
-                logger.success(f"🤖 AI SIGNAL: {decision} on {self.market.symbol} (Conf: {self.market.confidence:.1f}%)")
+                # New: Dynamic TP/SL based on ATR
+                atr = self.market.atr
+                if atr == 0:
+                    atr = 0.001 * self.market.ask  # Fallback ~0.1%
+                sl_dist = atr * 1.0  # Risk 1 ATR
+                tp_dist = atr * 2.5  # Reward 2.5 ATR
+
+                if decision == "BUY":
+                    sl = self.market.ask - sl_dist
+                    tp = self.market.ask + tp_dist
+                else:  # SELL
+                    sl = self.market.ask + sl_dist
+                    tp = self.market.ask - tp_dist
+
+                logger.success(f"AI SIGNAL: {decision} on {self.market.symbol} (Conf: {self.market.confidence:.1f}%) | ATR: {atr:.5f} | SL: {sl:.5f} | TP: {tp:.5f}")
                 self.last_trade_time = now
                 
                 events.emit(EventType.TRADE_COMMAND, {
                     "action": decision,
-                    "sl": self.settings.sl if self.settings.auto_sl_tp else 0.0,
-                    "tp": self.settings.tp if self.settings.auto_sl_tp else 0.0
+                    "sl": sl,
+                    "tp": tp
                 })
                 
         except Exception as e:
