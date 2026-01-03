@@ -118,11 +118,22 @@ class SimplePredictor:
                 
                 # Handle symbol encoding (appends 1 value for 2 symbols)
                 symbol_encoded = np.zeros(len(self.features) - 10)  # Fallback zeros for num symbol cols
-                if self.encoder and symbol in self.encoder.categories_[0]:
-                    try:
-                        symbol_encoded = self.encoder.transform([[symbol]])[0]
-                    except:
-                        pass  # Stick with zeros
+                
+                # FIX: Check categories and use DataFrame with correct column name
+                if self.encoder:
+                    # Defensive check if symbol is in the known categories
+                    # The encoder stores categories in a list of arrays (one per feature)
+                    known_symbols = self.encoder.categories_[0]
+                    if symbol in known_symbols:
+                        try:
+                            # ---------------------------------------------------------
+                            # FIX IS HERE: Wrap in DataFrame with column 'symbol'
+                            # ---------------------------------------------------------
+                            sym_df = pd.DataFrame([[symbol]], columns=['symbol'])
+                            symbol_encoded = self.encoder.transform(sym_df)[0]
+                        except Exception as e:
+                            # logger.warning(f"Encoding warning: {e}")
+                            pass 
                 
                 # Full data: base + encoded (now 11 values for 11 columns)
                 full_data = base_features + list(symbol_encoded)
@@ -138,7 +149,7 @@ class SimplePredictor:
             except Exception as e:
                 logger.error(f"Predictor error: {e}")
                 # Log data debug for troubleshooting
-                logger.debug(f"Debug: len(full_data)={len(full_data)}, len(features)={len(self.features)}, symbol={symbol}")
+                logger.debug(f"Debug: len(full_data)={len(full_data) if 'full_data' in locals() else 'N/A'}, len(features)={len(self.features)}, symbol={symbol}")
                 return ask  # Fallback to current price on error
         
         # Log progress if we are collecting data

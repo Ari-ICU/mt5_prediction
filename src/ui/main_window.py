@@ -388,11 +388,11 @@ class MainWindow:
         self.lbl_bid = self._create_price_box(prices, "BID", config.ACCENT_RED, 0)
         self.lbl_ask = self._create_price_box(prices, "ASK", config.ACCENT_GREEN, 1)
 
-        # AI Insights Row (REFACTORED)
+        # AI Insights Row (REFACTORED with Price Action)
         ai_frame = tk.Frame(card, bg=config.CARD_BG)
         ai_frame.pack(fill="x", pady=(20, 0))
 
-        # Row 1: Confidence | Trend | Target
+        # Row 1: Confidence | Price Action Signal | Target
         row1 = tk.Frame(ai_frame, bg=config.CARD_BG)
         row1.pack(fill="x")
         
@@ -405,10 +405,10 @@ class MainWindow:
                                     fg=config.TEXT_SECONDARY, bg=config.CARD_BG)
         self.lbl_ai_conf.pack()
 
-        # Center: Direction Signal
-        self.lbl_ai_dir = tk.Label(row1, text="WAIT", font=(config.FONT_BOLD, 14, "bold"), 
+        # Center: Price Action Signal (New: Based on RSI, SMA, ATR momentum)
+        self.lbl_price_action = tk.Label(row1, text="NEUTRAL", font=(config.FONT_BOLD, 14, "bold"), 
                                    fg=config.TEXT_MUTED, bg=config.CARD_BG)
-        self.lbl_ai_dir.pack(side="left", padx=10)
+        self.lbl_price_action.pack(side="left", padx=10)
 
         # Right side: Main Prediction
         pred_box = tk.Frame(row1, bg=config.CARD_BG)
@@ -419,25 +419,39 @@ class MainWindow:
                                     fg=config.ACCENT_BLUE, bg=config.CARD_BG)
         self.lbl_ai_pred.pack()
 
-        # Row 2: TP Breakdown
+        # Row 2: TP Breakdown (Enhanced with ATR-based levels)
         row2 = tk.Frame(ai_frame, bg=config.CARD_BG)
         row2.pack(fill="x", pady=(15, 0))
         
-        self.lbl_tp1 = self._create_tp_box(row2, "TP 1 (Safe)", config.TEXT_SECONDARY)
-        self.lbl_tp2 = self._create_tp_box(row2, "TP 2 (Mid)", config.TEXT_PRIMARY)
-        self.lbl_tp3 = self._create_tp_box(row2, "TP 3 (Max)", config.ACCENT_PURPLE)
+        self.lbl_tp1 = self._create_tp_box(row2, "TP 1 (1x ATR)", config.TEXT_SECONDARY)
+        self.lbl_tp2 = self._create_tp_box(row2, "TP 2 (1.5x ATR)", config.TEXT_PRIMARY)
+        self.lbl_tp3 = self._create_tp_box(row2, "TP 3 (2.5x ATR)", config.ACCENT_PURPLE)
 
-        # Indicators Row
+        # Indicators Row (Added ATR, Recent High/Low)
         ind_frame = tk.Frame(card, bg=config.CARD_BG)
         ind_frame.pack(fill="x", pady=(15, 0))
         
         self.lbl_rsi = tk.Label(ind_frame, text="RSI: --", font=(config.FONT_MONO, 11), 
                                 fg=config.TEXT_MUTED, bg=config.CARD_BG)
-        self.lbl_rsi.pack(side="left", padx=(0, 25))
+        self.lbl_rsi.pack(side="left", padx=(0, 10))
         
         self.lbl_sma = tk.Label(ind_frame, text="SMA10: --", font=(config.FONT_MONO, 11), 
                                 fg=config.TEXT_MUTED, bg=config.CARD_BG)
-        self.lbl_sma.pack(side="left")
+        self.lbl_sma.pack(side="left", padx=(0, 10))
+        
+        # New: ATR Label
+        self.lbl_atr = tk.Label(ind_frame, text="ATR: --", font=(config.FONT_MONO, 11), 
+                                fg=config.ACCENT_PURPLE, bg=config.CARD_BG)
+        self.lbl_atr.pack(side="left", padx=(0, 10))
+        
+        # New: Recent High/Low (assume market.high/low from tick or bar)
+        self.lbl_high = tk.Label(ind_frame, text="HIGH: --", font=(config.FONT_MONO, 11), 
+                                 fg=config.ACCENT_GREEN, bg=config.CARD_BG)
+        self.lbl_high.pack(side="left", padx=(0, 10))
+        
+        self.lbl_low = tk.Label(ind_frame, text="LOW: --", font=(config.FONT_MONO, 11), 
+                                fg=config.ACCENT_RED, bg=config.CARD_BG)
+        self.lbl_low.pack(side="left")
 
     def _create_price_box(self, parent, label, color, col):
         box = tk.Frame(parent, bg=config.CARD_BG)
@@ -634,37 +648,74 @@ class MainWindow:
             conf_color = config.ACCENT_GREEN if market.confidence >= 100 else config.TEXT_SECONDARY
             self.lbl_ai_conf.configure(fg=conf_color)
             
-            # Smart TP Calculation Logic
+            # Price Action Enhanced Logic
             curr = market.ask 
             targ = market.prediction
+            atr = getattr(market, 'atr', 0)
+            rsi = getattr(market, 'rsi', 50)
+            sma10 = getattr(market, 'sma10', curr)
             
-            if targ != 0 and curr != 0:
+            if targ != 0 and curr != 0 and atr > 0:
                 delta = targ - curr
                 
-                # Determine Direction
-                if delta > 0:
+                # Determine Direction from Price Action (SMA + RSI)
+                if curr > sma10 and rsi < 70:
                     direction = "BULLISH"
                     color = config.ACCENT_GREEN
-                else:
+                    pa_signal = "Momentum Up"
+                elif curr < sma10 and rsi > 30:
                     direction = "BEARISH"
                     color = config.ACCENT_RED
+                    pa_signal = "Momentum Down"
+                else:
+                    direction = "NEUTRAL"
+                    color = config.TEXT_SECONDARY
+                    pa_signal = "Consolidation"
                 
-                self.lbl_ai_dir.configure(text=direction, fg=color)
+                # --- FIX START ---
+                self.lbl_price_action.configure(text=pa_signal, fg=color)
+                
+                # REMOVE OR COMMENT THIS LINE (It causes the crash):
+                # self.lbl_ai_dir.configure(text=direction, fg=color) 
+                
                 self.lbl_ai_pred.configure(fg=color)
+                # --- FIX END ---
 
-                # Calculate TP Levels (33%, 66%, 100%)
-                tp1 = curr + (delta * 0.33)
-                tp2 = curr + (delta * 0.66)
-                tp3 = targ # Main Target
+                # Calculate TP Levels using ATR
+                if delta > 0:  # Bullish
+                    tp1 = curr + (1 * atr)
+                    tp2 = curr + (1.5 * atr)
+                    tp3 = curr + (2.5 * atr)
+                else:  # Bearish
+                    tp1 = curr - (1 * atr)
+                    tp2 = curr - (1.5 * atr)
+                    tp3 = curr - (2.5 * atr)
                 
                 self.lbl_tp1.configure(text=f"{tp1:.2f}", fg=color)
                 self.lbl_tp2.configure(text=f"{tp2:.2f}", fg=color)
                 self.lbl_tp3.configure(text=f"{tp3:.2f}", fg=color)
+            else:
+                # Fallback logic...
+                if targ != 0 and curr != 0:
+                    delta_pct = (targ - curr) / curr
+                    delta = curr * delta_pct
+                    tp1 = curr + (delta * 0.33)
+                    tp2 = curr + (delta * 0.66)
+                    tp3 = targ
+                    self.lbl_tp1.configure(text=f"{tp1:.2f}")
+                    self.lbl_tp2.configure(text=f"{tp2:.2f}")
+                    self.lbl_tp3.configure(text=f"{tp3:.2f}")
+                self.lbl_price_action.configure(text="NEUTRAL", fg=config.TEXT_SECONDARY)
             
-            # Indicators Update
+            # Indicators Update...
             if hasattr(self, 'lbl_rsi'):
-                self.lbl_rsi.configure(text=f"RSI: {market.rsi:.2f}")
-                self.lbl_sma.configure(text=f"SMA10: {market.sma10:.2f}")
+                self.lbl_rsi.configure(text=f"RSI: {rsi:.2f}")
+                self.lbl_sma.configure(text=f"SMA10: {sma10:.2f}")
+                self.lbl_atr.configure(text=f"ATR: {atr:.2f}" if atr > 0 else "ATR: --")
+                high = getattr(market, 'high', targ or curr)
+                low = getattr(market, 'low', curr - atr if atr > 0 else curr)
+                self.lbl_high.configure(text=f"HIGH: {high:.2f}")
+                self.lbl_low.configure(text=f"LOW: {low:.2f}")
 
     def _on_account_update(self, account: AccountData):
         self.root.after(0, lambda: self._update_account_ui(account))
