@@ -21,6 +21,7 @@ class MainWindow:
         self.sl_var = tk.StringVar(value=config.DEFAULT_SL)
         self.tp_var = tk.StringVar(value=config.DEFAULT_TP)
         self.auto_trade_var = tk.BooleanVar(value=False)
+        self.auto_lot_var = tk.BooleanVar(value=False)
         
         # Account / Server Config Variables
         self.host_var = tk.StringVar(value=config.HOST)
@@ -57,7 +58,7 @@ class MainWindow:
         events.subscribe(EventType.SYMBOLS_AVAILABLE, self._on_symbols_update)
         
         # Bind Settings Changes
-        for var in [self.lot_var, self.sl_var, self.tp_var, self.auto_trade_var, self.buy_conf_var, self.sell_conf_var, self.profit_target_var, self.max_pos_var, self.pos_profit_var, self.pos_loss_var, self.auto_sl_tp_var, self.default_symbol_var]:
+        for var in [self.lot_var, self.sl_var, self.tp_var, self.auto_trade_var, self.auto_lot_var, self.buy_conf_var, self.sell_conf_var, self.profit_target_var, self.max_pos_var, self.pos_profit_var, self.pos_loss_var, self.auto_sl_tp_var, self.default_symbol_var]:
             var.trace_add("write", self._broadcast_settings)
         
         # Initial sync
@@ -77,7 +78,8 @@ class MainWindow:
                 auto_sl_tp=self.auto_sl_tp_var.get(),
                 max_positions=int(self.max_pos_var.get() or 5),
                 buy_threshold=float(self.buy_conf_var.get() or 0.75),
-                sell_threshold=float(self.sell_conf_var.get() or 0.75)
+                sell_threshold=float(self.sell_conf_var.get() or 0.75),
+                auto_lot=self.auto_lot_var.get()
             )
             events.emit(EventType.SETTINGS_CHANGE, settings)
             
@@ -485,6 +487,11 @@ class MainWindow:
         
         self._create_combo_field(inputs, "SYMBOL", self.default_symbol_var, config.SYMBOL_OPTIONS).pack(side="left", padx=(0, 15))
         self._create_input_field(inputs, "VOLUME", self.lot_var).pack(side="left", padx=(0, 15))
+        
+        # Auto Lot Toggle
+        tk.Checkbutton(inputs, text="AUTO", variable=self.auto_lot_var,
+                       bg=config.CARD_BG, fg=config.ACCENT_BLUE, selectcolor=config.THEME_COLOR,
+                       activebackground=config.CARD_BG, font=(config.FONT_BOLD, 8)).pack(side="left", padx=(0, 15))
         
         # Stop Loss Spinbox
         sl_frame = self._create_spin_field(inputs, "SL:", self.sl_var)

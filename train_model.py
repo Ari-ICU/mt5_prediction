@@ -1,122 +1,124 @@
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import OneHotEncoder
 import joblib
 import os
 import sys
 import random
-import time
 from tqdm import tqdm
 
-# Debug flag
-VERBOSE = False  # Set to True for prints
+# --- Swarm Intelligence: Particle Swarm Optimization (PSO) ---
 
-# --- Swarm Intelligence: PSO Optimized for Strategy Return ---
 class Particle:
     def __init__(self, bounds):
-        self.position = [random.uniform(lower, upper) for lower, upper in bounds]
-        self.velocity = [random.uniform(-1, 1) for _ in bounds]
-        self.best_position = list(self.position)
+        self.position = []
+        self.velocity = []
+        self.best_position = []
         self.best_score = -float('inf')
         self.bounds = bounds
+        
+        for lower, upper in bounds:
+            self.position.append(random.uniform(lower, upper))
+            self.velocity.append(random.uniform(-1, 1))
+        
+        self.best_position = list(self.position)
 
     def update_velocity(self, global_best_position, w=0.5, c1=1.5, c2=1.5):
         for i in range(len(self.position)):
-            r1, r2 = random.random(), random.random()
+            r1 = random.random()
+            r2 = random.random()
+            
+            # Cognitive component (personal best)
             cognitive = c1 * r1 * (self.best_position[i] - self.position[i])
+            # Social component (swarm best)
             social = c2 * r2 * (global_best_position[i] - self.position[i])
+            
             self.velocity[i] = w * self.velocity[i] + cognitive + social
 
     def update_position(self):
         for i in range(len(self.position)):
             self.position[i] += self.velocity[i]
+            
+            # Enforce bounds
             lower, upper = self.bounds[i]
             if self.position[i] < lower:
                 self.position[i] = lower
-                self.velocity[i] *= -1
+                self.velocity[i] *= -1  # Bounce back
             elif self.position[i] > upper:
                 self.position[i] = upper
                 self.velocity[i] *= -1
 
 class PSOOptimizer:
-    def __init__(self, n_particles, bounds, n_iterations, X, y, future_returns):
+    def __init__(self, n_particles, bounds, n_iterations, X, y):
         self.n_particles = n_particles
         self.bounds = bounds
         self.n_iterations = n_iterations
         self.X = X
         self.y = y
-        self.future_returns = future_returns
-        self.global_best_position = None
+        self.global_best_position = []
         self.global_best_score = -float('inf')
         self.particles = [Particle(bounds) for _ in range(n_particles)]
 
     def evaluate_fitness(self, params):
-        if VERBOSE:
-            print(f"  Evaluating params: n_est={int(params[0])}, depth={int(params[1])}, split={int(params[2])}")
-        start_time = time.time()
+        # Decode params (convert floats to ints for RF)
         n_estimators = int(params[0])
         max_depth = int(params[1])
         min_samples_split = int(params[2])
         
-        model = RandomForestClassifier(
+        # Train a quick model for validation
+        model = RandomForestRegressor(
             n_estimators=n_estimators,
             max_depth=max_depth,
             min_samples_split=min_samples_split,
-            random_state=42,
-            n_jobs=-1  # Parallelize trees
+            n_jobs=1,  # Changed to 1 to avoid threading issues; increase if multi-core is stable
+            random_state=42
         )
         
-        tscv = TimeSeriesSplit(n_splits=3)
-        fold_returns = []
-        fold_num = 0
-        for train_index, val_index in tscv.split(self.X):
-            fold_num += 1
-            if VERBOSE:
-                print(f"    Fold {fold_num}: train={len(train_index)}, val={len(val_index)}")
-            fold_start = time.time()
+        # Use TimeSeriesSplit for valid financial validation (reduced splits for speed)
+        tscv = TimeSeriesSplit(n_splits=3)  # Reduced from 5 to 3 for faster eval
+        scores = []
+        
+        # Manual Cross-Validation loop
+        for fold, (train_index, val_index) in enumerate(tscv.split(self.X)):
             X_train_fold, X_val_fold = self.X.iloc[train_index], self.X.iloc[val_index]
             y_train_fold, y_val_fold = self.y.iloc[train_index], self.y.iloc[val_index]
-            actual_ret_fold = self.future_returns.iloc[val_index]
+            
             model.fit(X_train_fold, y_train_fold)
-            pred_fold = model.predict(X_val_fold)
-            signals = 2 * pred_fold - 1
-            strat_ret_fold = signals * actual_ret_fold
-            fold_score = np.prod(1 + strat_ret_fold) - 1
-            fold_returns.append(fold_score)
-            if VERBOSE:
-                print(f"      Fold {fold_num} score: {fold_score:.4f} (took {time.time() - fold_start:.1f}s)")
-            if time.time() - fold_start > 30:  # Rough timeout
-                print(f"Warning: Fold {fold_num} too slow (>30s), skipping remaining.")
-                break
-        avg_score = np.mean(fold_returns)
-        if VERBOSE:
-            print(f"  Fitness complete: {avg_score:.4f} (total {time.time() - start_time:.1f}s)")
-        return avg_score
+            score = model.score(X_val_fold, y_val_fold)
+            scores.append(score)
+            
+        return np.mean(scores)
 
     def optimize(self):
-        print(f"Swarm Optimization for Classifier (Return-Focused)...")
-        pbar = tqdm(total=self.n_iterations, desc="PSO Iterations")
-        for i in range(self.n_iterations):
-            if VERBOSE:
-                print(f"\n--- Iteration {i+1}/{self.n_iterations} ---")
-            for j, particle in enumerate(self.particles):
-                if VERBOSE:
-                    print(f"  Particle {j+1}/{self.n_particles}")
+        print(f"Swarm Optimization initialized with {self.n_particles} particles...")
+        
+        for i in tqdm(range(self.n_iterations), desc="PSO Iterations"):
+            for particle_idx, particle in enumerate(self.particles):
                 score = self.evaluate_fitness(particle.position)
+                print(f"Particle {particle_idx+1} score: {score:.4f}")  # Debug print
+                
+                # Update Personal Best
                 if score > particle.best_score:
                     particle.best_score = score
                     particle.best_position = list(particle.position)
+                
+                # Update Global Best
                 if score > self.global_best_score:
                     self.global_best_score = score
                     self.global_best_position = list(particle.position)
+            
+            # Move Swarm
             for particle in self.particles:
                 particle.update_velocity(self.global_best_position)
                 particle.update_position()
-            pbar.set_postfix({"Best Fold Avg Return": f"{self.global_best_score:.4f}"})
-            pbar.update(1)
-        pbar.close()
+                
+            print(f"   Iteration {i+1}/{self.n_iterations} | Best Score: {self.global_best_score:.4f} | Params: {self.get_best_params()}")
+
+        return self.get_best_params()
+
+    def get_best_params(self):
         return {
             'n_estimators': int(self.global_best_position[0]),
             'max_depth': int(self.global_best_position[1]),
@@ -124,143 +126,147 @@ class PSOOptimizer:
         }
 
 # --- Main Training Pipeline ---
-def train(symbol=None):
-    if not symbol:
-        if len(sys.argv) > 1:
-            symbol = sys.argv[1].replace("_history.csv", "").replace("dataset/", "")
-        else:
-            csv_files = [f for f in os.listdir("dataset") if f.endswith("_history.csv")]
-            if not csv_files:
-                print("No datasets found. Sync data first.")
-                return
-            symbol = csv_files[0].replace("_history.csv", "")
-    csv_path = f"dataset/{symbol}_history.csv"
-    if not os.path.exists(csv_path):
-        print(f"File {csv_path} not found.")
-        return
 
-    print(f"Loading data for {symbol}...")
-    df = pd.read_csv(csv_path)
-    print(f"Raw data shape: {df.shape}")  # Debug: Check size
-    df['time'] = pd.to_datetime(df['time'])
-    df.set_index('time', inplace=True)
+def train(symbol=None):
+    # 1. Auto-Detect All Symbols (or single if specified)
+    csv_files = [f for f in os.listdir("dataset") if f.endswith("_history.csv")]
+    if not csv_files:
+        print("No datasets found in 'dataset/' folder. Please add *_history.csv files.")
+        return
     
-    # Feature Engineering (Enhanced for BTC)
+    if symbol:
+        csv_path = f"dataset/{symbol}_history.csv"
+        if not os.path.exists(csv_path):
+            print(f"Specified file {csv_path} not found.")
+            return
+        csv_files = [f"{symbol}_history.csv"]  # Limit to one
+    
+    print(f"Found datasets: {csv_files}")
+    dfs = []
+    for f in tqdm(csv_files, desc="Loading datasets"):
+        csv_path = f"dataset/{f}"
+        df = pd.read_csv(csv_path, on_bad_lines='warn')
+        print(f"Loaded {len(df)} rows for {f.replace('_history.csv', '')}")
+        # Add symbol column for multi-asset awareness
+        symbol_name = f.replace('_history.csv', '')
+        df['symbol'] = symbol_name
+        dfs.append(df)
+    
+    # Combine all
+    df = pd.concat(dfs, ignore_index=True)
+    print(f"Combined dataset shape: {df.shape}")
+    
+    # 2. Feature Engineering
+    print("Engineering features...")
     for col in ['open', 'high', 'low', 'close', 'volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-    df = df.dropna()
+    df = df.dropna(subset=['open', 'high', 'low', 'close', 'volume'])
 
-    # EMAs for MACD
-    def ema(series, period):
-        return series.ewm(span=period).mean()
-    df['EMA12'] = ema(df['close'], 12)
-    df['EMA26'] = ema(df['close'], 26)
-    df['MACD'] = (df['EMA12'] - df['EMA26']) / df['close']
-
-    print("Computing features...")
-    feature_progress = tqdm(total=10, desc="Features")
-    df['SMA_10_Ratio'] = df['close'] / df['close'].rolling(10).mean()
-    feature_progress.update(1)
-    df['SMA_30_Ratio'] = df['close'] / df['close'].rolling(30).mean()
-    feature_progress.update(1)
-    df['Volatility_Pct'] = df['close'].rolling(10).std() / df['close']
-    feature_progress.update(1)
+    # Moving Averages
+    df['SMA_10_Ratio'] = df['close'] / df['close'].rolling(window=10).mean()
+    df['SMA_30_Ratio'] = df['close'] / df['close'].rolling(window=30).mean()
+    df['Volatility_Pct'] = df['close'].rolling(window=10).std() / df['close']
+    
+    # Returns
     df['Return_1'] = df['close'].pct_change(1)
-    feature_progress.update(1)
     df['Return_5'] = df['close'].pct_change(5)
-    feature_progress.update(1)
+    
+    # RSI
     delta = df['close'].diff()
-    gain = delta.where(delta > 0, 0).rolling(14).mean()
-    loss = -delta.where(delta < 0, 0).rolling(14).mean()
-    rs = gain / loss.replace(0, np.finfo(float).eps)  # Avoid div0 with tiny eps
-    df['RSI'] = np.clip(100 - (100 / (1 + rs)), 0, 100)  # Clip inf/NaN
-    feature_progress.update(1)
-    low_14 = df['low'].rolling(14).min()
-    high_14 = df['high'].rolling(14).max()
-    stoch_denom = high_14 - low_14
-    df['Stoch_K'] = 100 * ((df['close'] - low_14) / stoch_denom.replace(0, np.finfo(float).eps))
-    df['Stoch_K'] = np.clip(df['Stoch_K'], 0, 100)
-    df['Stoch_D'] = df['Stoch_K'].rolling(3).mean()
-    feature_progress.update(1)
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # Stochastic Oscillator (14, 3, 3)
+    low_14 = df['low'].rolling(window=14).min()
+    high_14 = df['high'].rolling(window=14).max()
+    df['Stoch_K'] = 100 * ((df['close'] - low_14) / (high_14 - low_14))
+    df['Stoch_D'] = df['Stoch_K'].rolling(window=3).mean()
+    
     df['vol_change'] = df['volume'].pct_change()
-    feature_progress.update(1)
     
-    # BTC Enhancement
-    df['log_volume'] = np.log(df['volume'] + 1)
-    feature_progress.update(1)
-    atr_df = pd.DataFrame({
-        'hl': df['high'] - df['low'],
-        'hc': abs(df['high'] - df['close'].shift()),
-        'lc': abs(df['low'] - df['close'].shift())
-    }).max(axis=1).rolling(14).mean()
-    df['ATR_Pct'] = atr_df / df['close']
-    feature_progress.update(1)
-    feature_progress.close()
+    # ATR (Average True Range)
+    df['tr'] = np.maximum.reduce([
+        df['high'] - df['low'],
+        np.abs(df['high'] - df['close'].shift()),
+        np.abs(df['low'] - df['close'].shift())
+    ])
+    df['ATR'] = df['tr'].rolling(14).mean()
+    df['ATR_norm'] = df['ATR'] / df['close']
     
-    # Target
-    df['future_return'] = df['close'].pct_change().shift(-1)
-    df['future_return'] = np.clip(df['future_return'], -0.1, 0.1)
-    df['target'] = np.where(df['future_return'] > 0, 1, 0)
+    # Target: Next bar return
+    df['target'] = (df['close'].shift(-1) - df['close']) / df['close']
     df = df.dropna()
-    print(f"Clean data shape: {df.shape}")  # Debug
+    
+    print(f"Post-dropna shape: {df.shape}")
+    
+    # One-hot encode symbol for multi-asset
+    encoder = OneHotEncoder(sparse_output=False, drop='first')
+    symbol_encoded = encoder.fit_transform(df[['symbol']])
+    symbol_df = pd.DataFrame(symbol_encoded, columns=[f'symbol_{c}' for c in encoder.get_feature_names_out(['symbol'])])
+    df = pd.concat([df.reset_index(drop=True), symbol_df.reset_index(drop=True)], axis=1)
     
     features = [
-        'SMA_10_Ratio', 'SMA_30_Ratio', 'Volatility_Pct', 'MACD',
-        'RSI', 'Stoch_K', 'Stoch_D', 'vol_change', 'Return_1', 'Return_5',
-        'log_volume', 'ATR_Pct'
-    ]
-    X = df[features].replace([np.inf, -np.inf], np.nan).fillna(0)  # Robust clean
+        'SMA_10_Ratio', 'SMA_30_Ratio', 'Volatility_Pct', 
+        'RSI', 'Stoch_K', 'Stoch_D', 
+        'vol_change', 'Return_1', 'Return_5',
+        'ATR_norm'
+    ] + [col for col in df.columns if col.startswith('symbol_')]  # Add encoded symbols
+    
+    X = df[features]
     y = df['target']
-    future_returns = df['future_return']
     
-    if len(X) < 50:
-        print("Warning: Too few samples (<50). PSO unreliable – add more data.")
-        return
+    print(f"X shape: {X.shape}, y shape: {y.shape}")
+    print(f"NaN counts:\n{X.isnull().sum()}")
+    print(f"Sample X head:\n{X.head()}")
     
+    # Optional: Subsample for faster dev (remove in production)
+    # df = df.sample(frac=0.3, random_state=42).reset_index(drop=True)
+    # X = df[features]
+    # y = df['target']
+    
+    # Split for Final Test (Hold-out set)
     cutoff = int(len(X) * 0.8)
     X_train_opt = X.iloc[:cutoff]
     y_train_opt = y.iloc[:cutoff]
-    future_train_opt = future_returns.iloc[:cutoff]
     X_test = X.iloc[cutoff:]
     y_test = y.iloc[cutoff:]
-    future_test = future_returns.iloc[cutoff:]
-    print(f"Train size: {len(X_train_opt)}, Test: {len(X_test)}")  # Debug
     
-    # PSO (Reduced for speed)
-    bounds = [(50, 300), (5, 30), (2, 20)]
-    pso = PSOOptimizer(5, bounds, 3, X_train_opt, y_train_opt, future_train_opt)  # Smaller: 5x3=15 evals/iter
+    # 3. Swarm Optimization (tighter bounds and smaller swarm for speed)
+    bounds = [(50, 100), (5, 15), (2, 10)]  # Reduced for faster training
+    
+    print(f"Launching Swarm Intelligence for Hyperparameter Tuning...")
+    pso = PSOOptimizer(n_particles=3, bounds=bounds, n_iterations=2, X=X_train_opt, y=y_train_opt)  # Smaller for testing
     best_params = pso.optimize()
     
-    # Rest unchanged...
-    print("Final model training...")
-    model = RandomForestClassifier(**best_params, random_state=42, n_jobs=-1)
+    print(f"Best Parameters Found: {best_params}")
+    
+    # 4. Final Training
+    print(f"Training final model with optimized parameters...")
+    model = RandomForestRegressor(
+        n_estimators=best_params['n_estimators'],
+        max_depth=best_params['max_depth'],
+        min_samples_split=best_params['min_samples_split'],
+        random_state=42,
+        n_jobs=-1  # Back to -1 for final fit
+    )
     model.fit(X_train_opt, y_train_opt)
     
-    pred_test = model.predict(X_test)
-    acc = accuracy_score(y_test, pred_test)
-    print(f"Test Accuracy: {acc:.4f}")
+    # 5. Evaluation
+    score = model.score(X_test, y_test)
+    print(f"Final Test Score (R2) on Combined Data: {score:.4f}")
     
-    signals = 2 * pred_test - 1
-    min_len = min(len(future_test), len(signals))
-    future_test = future_test.iloc[:min_len]
-    signals = signals[:min_len]
-    strategy_returns = signals * future_test
-    cum_return = np.prod(1 + strategy_returns) - 1
-    win_rate = np.sum(strategy_returns > 0) / len(strategy_returns)
-    mean_ret = np.mean(strategy_returns)
-    std_ret = np.std(strategy_returns)
-    sharpe = np.sqrt(365) * mean_ret / std_ret if std_ret > 0 else 0
-    print(f"Backtest Cum Return: {cum_return:.4f}")
-    print(f"Win Rate: {win_rate:.4f}")
-    print(f"Sharpe Ratio: {sharpe:.4f}")
-    
-    if cum_return > 0 or acc > 0.52:
-        os.makedirs("models", exist_ok=True)
-        joblib.dump(model, "models/direction_predictor.pkl")
-        joblib.dump(features, "models/feature_names.pkl")
-        print("Profitable model saved!")
-    else:
-        print("Warning: No strong edge. Add more data or features.")
+    # 6. Save (also save encoder for predictor use)
+    os.makedirs("models", exist_ok=True)
+    joblib.dump(model, "models/price_predictor.pkl")
+    joblib.dump(features, "models/feature_names.pkl")
+    joblib.dump(encoder, "models/symbol_encoder.pkl")
+    print(f"Multi-Symbol Predictor saved to models/price_predictor.pkl")
 
 if __name__ == "__main__":
-    train()
+    # Optional: Pass symbol to train only on one, e.g., python train_model.py BTCUSDm
+    if len(sys.argv) > 1:
+        train(sys.argv[1])
+    else:
+        train()  # All symbols

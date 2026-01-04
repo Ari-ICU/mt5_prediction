@@ -42,31 +42,43 @@ class SimpleStrategy(StrategyBase):
         final_conf = base_conf
         direction = "UP" if price_delta > 0 else "DOWN"
         
-        # CHART PATTERN BOOST (+30%)
-        # In a trending market, 'overbought' is actually strong BULLISH momentum.
+        # CHART PATTERN BOOST
+        # Strong trends get a bigger boost, and we require confirmation for regular trends
         if direction == "UP":
-            if pattern in ["bullish", "oversold", "overbought"]:
-                final_conf += 30 
+            if pattern == "strong_bullish":
+                final_conf += 40
+            elif pattern == "bullish":
+                final_conf += 20
+            elif pattern == "oversold": # Mean reversion setup
+                final_conf += 15
         elif direction == "DOWN":
-            if pattern in ["bearish", "overbought", "oversold"]:
-                final_conf += 30 
+            if pattern == "strong_bearish":
+                final_conf += 40
+            elif pattern == "bearish":
+                final_conf += 20
+            elif pattern == "overbought": # Mean reversion setup
+                final_conf += 15
             
         # STOCHASTIC OSCILLATOR BOOST (+10%)
         # Standard Oversold/Overbought confirmation
         if direction == "UP":
-            # If Oversold (K < 20) and crossing up, it's a good buy signal
+            # If Oversold (K < 20) it's a good buy signal
             if stoch_k < 20:
-                final_conf += 10
-                logger.info(f"📈 Stochastic Oversold (K={stoch_k:.1f}) -> BOOST")
+                final_conf += 15
+                logger.debug(f"📈 Stochastic Oversold (K={stoch_k:.1f}) -> BOOST")
+            elif stoch_k < 50: # Mildly bullish
+                final_conf += 5
         elif direction == "DOWN":
-            # If Overbought (K > 80) and crossing down
+            # If Overbought (K > 80)
             if stoch_k > 80:
-                final_conf += 10
-                logger.info(f"📉 Stochastic Overbought (K={stoch_k:.1f}) -> BOOST")
+                final_conf += 15
+                logger.debug(f"📉 Stochastic Overbought (K={stoch_k:.1f}) -> BOOST")
+            elif stoch_k > 50: # Mildly bearish
+                final_conf += 5
 
         # NEWS SENTIMENT BOOST (+15%)
-        bullish_keywords = ["surge", "rally", "high", "growth", "positive", "uptrend", "bullish", "jump", "buy", "gain"]
-        bearish_keywords = ["crash", "drop", "plunge", "crisis", "negative", "low", "dip", "bearish", "fall", "sell", "loss"]
+        bullish_keywords = ["surge", "rally", "high", "growth", "positive", "uptrend", "bullish", "jump", "buy", "gain", "breakout"]
+        bearish_keywords = ["crash", "drop", "plunge", "crisis", "negative", "low", "dip", "bearish", "fall", "sell", "loss", "breakdown"]
         sentiment_score = 0
         for h in headlines:
             h_lower = h.lower()
@@ -79,18 +91,23 @@ class SimpleStrategy(StrategyBase):
         # 4. Final Final Signal Generation
         final_signal = "HOLD"
         
-        if direction == "UP" and final_conf >= buy_threshold:
-            # Overbought is risky but allowed if AI is extremely confident
-            if pattern == "overbought" and final_conf < 90:
-                logger.warning(f"⚠️ MOMENTUM RISK: RSI is high ({state['rsi']:.1f}). Need >90% conf to BUY. (Current: {final_conf:.1f}%)")
-            else:
+        # We increase the required confidence slightly for better win rate
+        # buy_threshold (usually 75%)
+        
+        if direction == "UP":
+            # Strict Filtering: Don't BUY if pattern is bearish/overbought unless AI is nearly 100%
+            if (pattern in ["bearish", "strong_bearish", "overbought"]) and final_conf < 85:
+                # logger.debug(f"Skipping BUY: Pattern is {pattern} and confidence {final_conf:.1f}% too low.")
+                pass
+            elif final_conf >= buy_threshold:
                 final_signal = "BUY"
                 
-        elif direction == "DOWN" and final_conf >= sell_threshold:
-            # Oversold is risky but allowed if AI is extremely confident
-            if pattern == "oversold" and final_conf < 90:
-                logger.warning(f"⚠️ MOMENTUM RISK: RSI is low ({state['rsi']:.1f}). Need >90% conf to SELL. (Current: {final_conf:.1f}%)")
-            else:
+        elif direction == "DOWN":
+            # Strict Filtering: Don't SELL if pattern is bullish/oversold unless AI is nearly 100%
+            if (pattern in ["bullish", "strong_bullish", "oversold"]) and final_conf < 85:
+                 # logger.debug(f"Skipping SELL: Pattern is {pattern} and confidence {final_conf:.1f}% too low.")
+                 pass
+            elif final_conf >= sell_threshold:
                 final_signal = "SELL"
 
         # Log factors for the user

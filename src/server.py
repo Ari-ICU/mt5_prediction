@@ -50,12 +50,14 @@ class MT5Handler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
         
-        response_text = state.pending_command if state.pending_command else "OK"
-        self.wfile.write(response_text.encode("utf-8"))
+        if state.pending_commands:
+            response_text = ";".join(state.pending_commands)
+            logger.info(f"Sent to MT5: {response_text}")
+            state.pending_commands = []
+        else:
+            response_text = "OK"
 
-        if state.pending_command:
-            logger.info(f"Sent to MT5: {state.pending_command}")
-            state.pending_command = ""
+        self.wfile.write(response_text.encode("utf-8"))
 
     def _process_data(self, data: dict):
         try:
@@ -128,7 +130,16 @@ class MT5Handler(BaseHTTPRequestHandler):
                     for p in parts:
                         if not p: continue
                         fields = p.split(":")
-                        if len(fields) >= 2:
+                        if len(fields) >= 6:
+                            positions_list.append(PositionData(
+                                ticket=int(fields[0]),
+                                profit=float(fields[1]),
+                                type=int(fields[2]),
+                                price_open=float(fields[3]),
+                                sl=float(fields[4]),
+                                tp=float(fields[5])
+                            ))
+                        elif len(fields) >= 2: # Legacy support
                             positions_list.append(PositionData(
                                 ticket=int(fields[0]),
                                 profit=float(fields[1])

@@ -12,6 +12,8 @@ class MarketData:
     confidence: float = 0.0
     rsi: float = 0.0
     sma10: float = 0.0
+    sma200: float = 0.0
+    atr: float = 0.0
     timestamp: datetime = field(default_factory=datetime.now)
 
     @property
@@ -46,12 +48,13 @@ class TradeSettings:
     max_positions: int = 5
     buy_threshold: float = 0.75
     sell_threshold: float = 0.75
+    auto_lot: bool = False
 
 @dataclass
 class PositionData:
     ticket: int = 0
     symbol: str = ""
-    type: str = "" # BUY/SELL
+    type: int = 0 # 0=BUY, 1=SELL
     volume: float = 0.0
     price_open: float = 0.0
     price_current: float = 0.0

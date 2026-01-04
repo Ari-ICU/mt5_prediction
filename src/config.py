@@ -13,6 +13,21 @@ DEFAULT_SL = "0"
 DEFAULT_TP = "0"
 AUTO_LOT_SIZE = 0.01
 MAX_SPREAD_DEFAULT = 50
+MAX_SLIPPAGE_DEFAULT = 30 # Points
+
+# Advanced Risk Management
+RISK_PER_TRADE = 0.01        # Risk 1.0% of account balance per trade
+MAX_DAILY_LOSS = 0.05       # Stop trading for the day if 5% loss reached
+MIN_LOT_SIZE = 0.01
+MAX_LOT_SIZE = 10.0
+TREND_EMA_PERIOD = 200      # Trend filter period
+TRAILING_STOP_MULT = 1.5    # ATR multiplier for trailing stop
+BREAK_EVEN_MULT = 1.0       # ATR multiplier to move SL to break-even
+BREAK_EVEN_TRIGGER = 0.5    # Move to BE when profit hits 0.5 * ATR
+TP_MAX_MULT = 2.5          # Maximum Reward Ratio
+TP_MIN_MULT = 1.0          # Minimum Reward Ratio
+MIN_CONFIDENCE_FOR_TRADE = 80.0 # Slightly lower bar for active markets
+SIGNAL_REVERSAL_CLOSE = True   # Close BUY if signal becomes SELL
 
 # GUI Settings
 FULLSCREEN_MODE = False

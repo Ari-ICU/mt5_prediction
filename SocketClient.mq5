@@ -19,7 +19,7 @@ bool historySynced = false;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    EventSetTimer(1);
+    EventSetMillisecondTimer(250); // Faster polling for lower latency
     CreateSyncButton();
     if(AutoSyncHistory) SyncHistory(PERIOD_H1, HistoryBars);
     return INIT_SUCCEEDED;
@@ -113,9 +113,9 @@ void OnTimer()
         hasWarnedAboutAlgo = false;
     }
 
-    // Rate limiting
-    if(TimeCurrent() - lastRequestTime < 1) return;
-    lastRequestTime = TimeCurrent();
+    // Rate limiting: 250ms matches timer
+    // if(TimeCurrent() - lastRequestTime < 1) return;
+    // lastRequestTime = TimeCurrent();
 
     // Data collection
     string marketStatus = IsMarketOpen(_Symbol) ? "OPEN" : "CLOSED";
@@ -136,7 +136,13 @@ void OnTimer()
         ulong ticket = PositionGetTicket(i);
         if(PositionSelectByTicket(ticket))
         {
-            positions_str += IntegerToString(ticket) + ":" + DoubleToString(PositionGetDouble(POSITION_PROFIT), 2) + "|";
+            // Format: Ticket:Profit:Type:PriceOpen:SL:TP
+            positions_str += IntegerToString(ticket) + ":" + 
+                             DoubleToString(PositionGetDouble(POSITION_PROFIT), 2) + ":" +
+                             IntegerToString(PositionGetInteger(POSITION_TYPE)) + ":" +
+                             DoubleToString(PositionGetDouble(POSITION_PRICE_OPEN), _Digits) + ":" +
+                             DoubleToString(PositionGetDouble(POSITION_SL), _Digits) + ":" +
+                             DoubleToString(PositionGetDouble(POSITION_TP), _Digits) + "|";
         }
     }
 
@@ -286,7 +292,21 @@ void SendRequest(string data_str, bool processCommands)
         StringReplace(result_str, "\0", "");
 
         if(StringLen(result_str) > 0)
-            ProcessCommand(result_str);
+        {
+            if(StringFind(result_str, ";") >= 0)
+            {
+                string cmd_list[];
+                int count = StringSplit(result_str, ';', cmd_list);
+                for(int i=0; i<count; i++) {
+                    if(StringLen(cmd_list[i]) > 0)
+                        ProcessCommand(cmd_list[i]);
+                }
+            }
+            else
+            {
+                ProcessCommand(result_str);
+            }
+        }
     }
 }
 
